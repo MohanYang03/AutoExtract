@@ -77,3 +77,6 @@ backend/data/
 *.bak
 *.tmp
 *.temp 
+# Local eval scratch
+eval/_yolo_tmp.png
+eval/out/

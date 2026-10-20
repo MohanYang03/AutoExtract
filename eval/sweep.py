@@ -141,6 +141,13 @@ def main():
                           for tr in (truth_sem, truth_sd) if tr), key=np.mean)
                 if best is None or np.mean(em) < np.mean(best[0]):
                     best = (em, et, p)
+            if best is not None and np.mean(best[0]) > 2:
+                # a same-size panel can be the wrong one; prefer a better subset fit
+                sub = subset_match(truth, truth_sem, truth_sd, panels, want_fig)
+                if sub is not None and np.mean(sub[0]) < np.mean(best[0]):
+                    em, et, where = sub
+                    rows.append((key, name, f"subset {where}", float(np.mean(em)), float(np.mean(et)), ""))
+                    continue
             if best is None:
                 sub = subset_match(truth, truth_sem, truth_sd, panels, want_fig)
                 if sub is None:

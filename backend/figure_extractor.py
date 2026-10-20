@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, asdict
-from typing import Any, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -29,6 +29,7 @@ import numpy as np
 
 DARK_THRESHOLD = 128      # gray < this counts as "ink" (lines, text, outlines)
 WHITE_THRESHOLD = 235     # gray >= this (and unsaturated) counts as background
+TEXT_THRESHOLD = 200      # gray < this counts as text when cropping labels
 
 
 # --------------------------------------------------------------------------- #
@@ -46,6 +47,7 @@ class Bar:
     label: str = ""
     color: Tuple[int, int, int] = (255, 255, 255)
     uncertain: bool = False   # error bar could not be confirmed; worth a manual check
+    n: Optional[int] = None   # sample size, entered by the user for the export
 
     @property
     def err(self) -> Optional[float]:
@@ -71,6 +73,7 @@ class Panel:
     label_left: Optional[int] = None   # left edge of the tick labels (px)
     bars: List[Bar] = field(default_factory=list)
     y_title: str = ""
+    letter: str = ""          # panel letter ("A", "B", ...) if one was found
     warnings: List[str] = field(default_factory=list)
 
     def value_at(self, py: float) -> Optional[float]:
@@ -83,6 +86,14 @@ class Panel:
         for b, bd in zip(self.bars, d["bars"]):
             bd["err"] = b.err
         return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Panel":
+        names = {f for f in cls.__dataclass_fields__}
+        bar_names = {f for f in Bar.__dataclass_fields__}
+        p = cls(**{k: v for k, v in d.items() if k in names and k != "bars"})
+        p.bars = [Bar(**{k: v for k, v in b.items() if k in bar_names}) for b in d.get("bars", [])]
+        return p
 
 
 # --------------------------------------------------------------------------- #
@@ -127,6 +138,8 @@ def parse_number(text: str) -> Optional[float]:
     if t in ("。", "o", "O", "()", "D"):     # how a lone "0" tends to come back
         return 0.0
     if re.search(r"[A-Za-z]{2,}", t) or not re.search(r"\d", t):   # words, not a tick label
+        return None
+    if re.search(r"\d\s+\d", t) or len(re.sub(r"\D", "", t)) > 7:      # digit soup, not a label
         return None
     t = t.translate(_NUM_FIX).replace(" ", "")
     # tolerate stray punctuation the recogniser glues on ("60.", "20÷", "50°")
@@ -194,9 +207,47 @@ def robust_linear_fit(points: List[Tuple[float, float]]) -> Tuple[Optional[float
     return float(a), float(b), n_in
 
 
+def _is_nice_step(step: float) -> bool:
+    """Axis steps are 1, 2, 2.5 or 5 times a power of ten."""
+    if step <= 0 or not np.isfinite(step):
+        return False
+    exp = np.floor(np.log10(step))
+    mant = step / 10 ** exp
+    return any(abs(mant - m) / m < 0.03 for m in (1, 2, 2.5, 5, 10))
+
+
+def _plausible_axis(slope: float, tick_ys: List[float], inliers: int) -> bool:
+    """
+    Reject calibrations built from noise (e.g. a micrograph mistaken for a
+    chart): the value step between neighbouring ticks must be a round number.
+    """
+    ys = sorted(tick_ys)
+    if len(ys) < 2 or slope >= 0:       # values must grow upward (pixel y shrinks)
+        return False
+    gaps = np.diff(ys)
+    spacing = float(np.median(gaps))
+    return _is_nice_step(abs(slope) * spacing) or (inliers >= 4 and _is_nice_step(abs(slope) * spacing / 2))
+
+
 # --------------------------------------------------------------------------- #
 # Extractor
 # --------------------------------------------------------------------------- #
+
+@dataclass
+class ExtractOptions:
+    """
+    What to read besides the numbers. Numbers (axis calibration, bar means,
+    error bars) are always extracted; everything here is optional.
+    """
+    bar_names: bool = True        # category labels under each bar (recognition only, cheap)
+    titles: bool = True           # panel letter + y-axis title, used to name sheets (cheap)
+    legend_colors: bool = False   # name bars from a colour legend (needs full-figure OCR, slow)
+
+    @classmethod
+    def from_dict(cls, d: Optional[dict]) -> "ExtractOptions":
+        d = d or {}
+        return cls(**{k: bool(v) for k, v in d.items() if k in cls.__dataclass_fields__})
+
 
 class FigureExtractor:
     def __init__(self, ocr: Optional[OCR] = None) -> None:
@@ -204,27 +255,71 @@ class FigureExtractor:
 
     # ---- public ---------------------------------------------------------- #
 
-    def extract(self, image: np.ndarray) -> List[Panel]:
+    def extract(self, image: np.ndarray, options: Optional[ExtractOptions] = None) -> List[Panel]:
+        opts = options or ExtractOptions()
+        if image is None or image.size == 0:
+            return []
         if image.ndim == 2:
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        elif image.shape[2] == 4:
+            image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         dark = (gray < DARK_THRESHOLD).astype(np.uint8)
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         ink = ((gray < WHITE_THRESHOLD) | (hsv[:, :, 1] > 40)).astype(np.uint8)
 
-        text_boxes = self.ocr.boxes(image)
         panels = []
         for axes in self._find_axes(dark):
             try:
-                panel = self._build_panel(image, gray, dark, ink, axes, text_boxes)
+                panel = self._build_panel(image, gray, dark, ink, axes, opts)
             except Exception as e:  # one bad panel must not sink the figure
-                print(f"panel at {axes} failed: {e}")
+                print(f"panel at {axes} failed: {type(e).__name__}: {e}")
                 continue
             if panel is not None and panel.bars and panel.slope is not None:
                 panels.append(panel)
-        self._assign_legend_labels(image, dark, panels, text_boxes)
-        panels.sort(key=lambda p: (round(p.y1 / max(image.shape[0] * 0.1, 1)), p.x1))
+        panels = self._drop_nested(panels)
+
+        if opts.legend_colors and any(not any(b.label for b in p.bars) for p in panels):
+            text_boxes = self.ocr.boxes(image)       # slow: only when asked for
+            self._assign_legend_labels(image, dark, panels, text_boxes)
+        if opts.titles:
+            for p in panels:
+                p.letter = self._find_letter_glyph(image, dark, p)
+        panels.sort(key=lambda p: (round(p.plot_top / max(image.shape[0] * 0.1, 1)), p.axis_x))
         return panels
+
+    @staticmethod
+    def _drop_nested(panels: List[Panel]) -> List[Panel]:
+        """A long bar edge can pose as a y-axis inside a real panel; keep the outer panel."""
+        keep = []
+        for p in panels:
+            inside = any(q is not p and q.axis_x < p.axis_x - 3 and p.plot_right <= q.plot_right + 3
+                         and abs(q.axis_y - p.axis_y) < 6 for q in panels)
+            if not inside:
+                keep.append(p)
+        return keep
+
+    def _find_letter_glyph(self, image, dark, p: Panel) -> str:
+        """Text detection often skips a lone letter; look for a big bold glyph up-left of the plot."""
+        H, W = dark.shape
+        x1, x2 = int(max(0, p.axis_x - 0.25 * W)), int(p.axis_x)
+        y1, y2 = int(max(0, p.plot_top - 0.12 * H)), int(p.plot_top + 0.02 * H)
+        region = dark[y1:y2, x1:x2]
+        if region.size == 0:
+            return ""
+        n, _, stats, _ = cv2.connectedComponentsWithStats(region, connectivity=8)
+        cands = []
+        for i in range(1, n):
+            x, y, w, h, area = stats[i]
+            if 0.012 * H <= h <= 0.05 * H and 0.4 * h <= w <= 1.3 * h and area >= 0.25 * w * h:
+                cands.append((x + y, x, y, w, h))
+        for _, x, y, w, h in sorted(cands):
+            pad = max(3, h // 4)
+            crop = image[y1 + max(0, y - pad): y1 + y + h + pad, x1 + max(0, x - pad): x1 + x + w + pad]
+            text, score = self.ocr.line(crop)
+            if re.fullmatch(r"[A-Z]", text.strip()) and score > 0.6:
+                return text.strip()
+        return ""
 
     # ---- step 1: axes ---------------------------------------------------- #
 
@@ -240,8 +335,12 @@ class FigureExtractor:
         found = []
         for vx, vy, vw, vh in verts:
             v_bottom = vy + vh - 1
+            # The x-axis meets the vertical line at or a little above its bottom
+            # (a group-separator tick can hang below the axis), so scan the
+            # lowest ~20% of the line.
+            reach = max(16, int(0.2 * vh))
             rows = []
-            for y in range(max(0, v_bottom - 15), min(H, v_bottom + 16)):
+            for y in range(max(vy, v_bottom - reach), min(H, v_bottom + 16)):
                 right_run = dark[y, vx:]
                 r = int(np.argmin(right_run)) if not right_run.all() else right_run.size
                 left_run = dark[y, :vx][::-1]
@@ -254,12 +353,21 @@ class FigureExtractor:
                 continue
             # A bar edge also meets the x-axis, but there the axis continues
             # to the left; at the real y-axis only a short tick does.
-            axis_rows = [y for y, r, l in rows if r >= 0.6 * longest and l < 60]
-            if not axis_rows or len(axis_rows) > 15:
+            cand = [y for y, r, l in rows if r >= 0.6 * longest and l < 60]
+            if not cand:
                 continue
+            # keep the lowest contiguous band (the axis, not a bar top above it)
+            axis_rows = [cand[-1]]
+            for y in reversed(cand[:-1]):
+                if y != axis_rows[0] - 1:
+                    break
+                axis_rows.insert(0, y)
+            if len(axis_rows) > 15:
+                continue
+            right = vx + max(r for y, r, _ in rows if y in axis_rows) - 1
             found.append(dict(axis_left=vx, axis_w=vw, top=vy,
                               axis_y=(axis_rows[0] + axis_rows[-1]) / 2.0,
-                              axis_h=axis_rows[-1] - axis_rows[0] + 1, right=vx + longest - 1))
+                              axis_h=axis_rows[-1] - axis_rows[0] + 1, right=right))
         # de-duplicate (a thick axis can yield two vertical components)
         uniq = []
         for f in sorted(found, key=lambda f: (f["axis_left"], f["top"])):
@@ -269,7 +377,7 @@ class FigureExtractor:
 
     # ---- step 2-4: one panel -------------------------------------------- #
 
-    def _build_panel(self, image, gray, dark, ink, ax, text_boxes) -> Optional[Panel]:
+    def _build_panel(self, image, gray, dark, ink, ax, opts: ExtractOptions) -> Optional[Panel]:
         H, W = gray.shape
         axis_left, axis_w = ax["axis_left"], ax["axis_w"]
         axis_x = axis_left + (axis_w - 1) / 2.0
@@ -281,7 +389,7 @@ class FigureExtractor:
 
         self._calibrate(panel, image, dark, axis_left, top, int(round(axis_y)), axis_h)
         if panel.slope is None:
-            panel.warnings.append("y-axis calibration failed (tick labels unreadable)")
+            return None                 # no readable axis: not a chart we can measure
 
         line_w = max(1, axis_h)
         panel.bars = self._find_bars(image, gray, dark, ink, axis_left + axis_w, right, top, axis_y, line_w)
@@ -289,8 +397,10 @@ class FigureExtractor:
             bar.mean = panel.value_at(bar.top_px)
             bar.mean_plus_err = panel.value_at(bar.cap_px) if bar.cap_px is not None else bar.mean
 
-        self._assign_xlabels(panel, dark, text_boxes)
-        panel.y_title = self._read_y_title(image, panel)
+        if opts.bar_names and panel.bars:
+            self._read_bar_names(image, gray, panel, line_w)
+        if opts.titles:
+            panel.y_title = self._read_y_title(image, panel)
         panel.y2 = int(min(H - 1, axis_y + 0.12 * H))
         panel.x1 = int(max(0, axis_left - 0.12 * W))
         return panel
@@ -333,6 +443,8 @@ class FigureExtractor:
             if val is not None:
                 pts.append((ty, val))
         a, b, n = robust_linear_fit(pts)
+        if a is not None and not _plausible_axis(a, [t[0] for t in ticks], n):
+            a, b, n = None, None, 0
         panel.slope, panel.intercept, panel.calibration_inliers = a, b, n
         if n and n < len(ticks):
             panel.warnings.append(f"{len(ticks) - n} of {len(ticks)} tick labels ignored as misreads")
@@ -345,9 +457,12 @@ class FigureExtractor:
         """
         y1, y2 = max(0, ty - half), min(dark.shape[0], ty + half + 1)
         x0 = max(0, label_right - 250)
-        band = dark[y1:y2, x0:max(x0, label_right)]
-        if band.size == 0:
+        if label_right - x0 < 2 or y2 - y1 < 2:
             return None, ""
+        # Small labels are often grey anti-aliased text that the strict "dark"
+        # threshold breaks into fragments; text on white is safely < 200.
+        band_gray = cv2.cvtColor(image[y1:y2, x0:label_right], cv2.COLOR_BGR2GRAY)
+        band = (band_gray < TEXT_THRESHOLD).astype(np.uint8)
         n, _, stats, _ = cv2.connectedComponentsWithStats(band, connectivity=8)
         blobs = []
         for i in range(1, n):
@@ -419,8 +534,38 @@ class FigureExtractor:
             bar_top_row = y + 1
             if start - bar_top_row < 1:
                 continue
-            top_px = y_lo + bar_top_row + (line_w - 1) / 2.0
+            # Dots and the cap resting on the bar can enclose white pockets that
+            # look solid. The real top edge is an ink line spanning (almost) the
+            # whole bar, so step down to the first such row.
+            # Bars without a dark outline have no such line: stop above the
+            # x-axis (itself a full-width dark line) and keep the fill edge.
+            span = slice(s + 2, e - 1)
+            search_end = start - line_w - 1          # rows above the axis line
+            has_outline = False
+            if search_end > bar_top_row:
+                dark_frac = dark[y_lo + bar_top_row: y_lo + search_end + 1,
+                                 x_lo + span.start: x_lo + span.stop].mean(axis=1)
+                full = np.where(dark_frac >= 0.85)[0]
+                if full.size:
+                    first = int(full[0])
+                    band_end = first
+                    while band_end + 1 < len(dark_frac) and dark_frac[band_end + 1] >= 0.85:
+                        band_end += 1
+                    thin = band_end - first + 1 <= 2 * line_w + 3
+                    reaches_axis = band_end == len(dark_frac) - 1      # dark-filled bar
+                    if thin or reaches_axis:
+                        bar_top_row += first
+                        has_outline = True
+            # An outline is centred on the value; a plain fill starts at it.
+            top_px = y_lo + bar_top_row + ((line_w - 1) / 2.0 if has_outline else -0.5)
+            # Trace the error bar in black ink first. Some journals draw it in
+            # the group's colour instead; only then fall back to any ink (the
+            # looser mask also merges anti-aliased dots into the whisker).
             cap_candidates = self._cap_candidates(dark, y_lo + bar_top_row, x_lo + s, x_lo + e, line_w, y_lo)
+            if cap_candidates["bar_top_y"] - cap_candidates["whisker_end"] <= line_w + 1:
+                colored = self._cap_candidates(ink, y_lo + bar_top_row, x_lo + s, x_lo + e, line_w, y_lo)
+                if colored["bar_top_y"] - colored["whisker_end"] > line_w + 1:
+                    cap_candidates = colored
 
             fill = image[y_lo + bar_top_row + line_w + 2: axis_row - line_w - 1, x_lo + inner.start: x_lo + inner.stop]
             color = (255, 255, 255)
@@ -558,42 +703,104 @@ class FigureExtractor:
             return False
         return t.lower().replace(" ", "") not in ("n.s.", "ns", "n.s")
 
-    def _assign_xlabels(self, panel: Panel, dark, text_boxes) -> None:
-        if not panel.bars:
+    def _read_bar_names(self, image, gray, panel: Panel, line_w: int) -> None:
+        """
+        Category labels under the x-axis, without running text detection:
+        find the text rows from the ink profile, split each row into words by
+        column gaps, and recognise each word group. A second row spanning a
+        bracket ("Res", "Sus") becomes a prefix for the bars under it.
+        """
+        H, W = gray.shape
+        bars = panel.bars
+        centers = np.array([(b.x1 + b.x2) / 2 for b in bars])
+        pitch = float(np.median(np.diff(centers))) if len(bars) > 1 else 2.0 * (bars[0].x2 - bars[0].x1)
+        x0 = int(max(0, centers[0] - pitch / 2))
+        x1 = int(min(W, centers[-1] + pitch / 2))
+        y0 = int(panel.axis_y + line_w + 2)
+        y1 = int(min(H, panel.axis_y + 0.35 * (panel.axis_y - panel.plot_top) + 40))
+        if y1 - y0 < 6 or x1 - x0 < 6:
             return
-        H = dark.shape[0]
-        widths = [b.x2 - b.x1 for b in panel.bars]
-        lo_x = panel.bars[0].x1 - np.median(widths)
-        hi_x = panel.bars[-1].x2 + np.median(widths)
-        below = [tb for tb in text_boxes
-                 if panel.axis_y + 2 < tb[0][1] < panel.axis_y + 0.12 * H
-                 and lo_x < (tb[0][0] + tb[0][2]) / 2 < hi_x
-                 and self._is_label_text(tb[1])]
-        if not below:
-            return
-        first_top = min(tb[0][1] for tb in below)
-        text_h = np.median([tb[0][3] - tb[0][1] for tb in below])
-        # category labels sit right under the axis; anything further is another panel
-        if first_top - panel.axis_y > 2.5 * text_h + 10:
-            return
-        row1 = [tb for tb in below if tb[0][1] < first_top + 0.6 * text_h]
-        row2 = [tb for tb in below if tb not in row1 and tb[0][1] < first_top + 4 * text_h]
+        text = (gray[y0:y1, x0:x1] < TEXT_THRESHOLD).astype(np.uint8)
+        # drop x-axis tick marks: blobs touching the top edge of the strip
+        n, lab, stats, _ = cv2.connectedComponentsWithStats(text, connectivity=8)
+        for i in range(1, n):
+            if stats[i, 1] <= 2 and stats[i, 3] < 0.12 * (y1 - y0) + 12 and stats[i, 2] <= 2 * line_w + 4:
+                text[lab == i] = 0
 
-        for bar in panel.bars:
-            cx = (bar.x1 + bar.x2) / 2
-            near = [tb for tb in row1 if abs((tb[0][0] + tb[0][2]) / 2 - cx) < 0.75 * (bar.x2 - bar.x1)]
-            if near:
-                bar.label = min(near, key=lambda tb: abs((tb[0][0] + tb[0][2]) / 2 - cx))[1].strip()
+        rows = _runs(text.any(axis=1))
+        bands = []           # text rows; thin wide rows are brackets
+        for s, e in rows:
+            h = e - s + 1
+            # a bracket has an unbroken horizontal run; text never does
+            longest = max((rb - ra + 1 for y in range(s, e + 1) for ra, rb in _runs(text[y])), default=0)
+            if longest > 0.6 * pitch:
+                bands.append(("bracket", s, e))
+            elif h >= 5:
+                bands.append(("text", s, e))
+        text_rows = [b for b in bands if b[0] == "text"]
+        if not text_rows:
+            return
+        # Labels must start right under the axis; rotated labels make one tall
+        # row that recognition can't read, so skip those rather than guess.
+        first = text_rows[0]
+        char_h = first[2] - first[1] + 1
+        if first[1] > 3 * char_h + 10 or char_h > 0.18 * (panel.axis_y - panel.plot_top) + 20:
+            return
 
-        # Second row = group labels under a bracket ("Res", "Sus"): prefix bars the bracket spans
-        for (bx1, by1, bx2, by2), text, _ in row2:
-            tcx = (bx1 + bx2) / 2
-            span = self._bracket_span(dark, int(tcx), int(by1), int(panel.axis_y))
-            if span is None:
+        def words(s, e):
+            cols = text[s:e + 1].any(axis=0)
+            h = e - s + 1
+            out, cur = [], None
+            for a, b in _runs(cols):
+                if cur and a - cur[1] <= 0.8 * h:
+                    cur[1] = b
+                else:
+                    if cur:
+                        out.append(cur)
+                    cur = [a, b]
+            if cur:
+                out.append(cur)
+            return out
+
+        def read(s, e, a, b):
+            pad = max(2, (e - s + 1) // 4)
+            crop = image[max(0, y0 + s - pad): y0 + e + pad + 1, max(0, x0 + a - pad): x0 + b + pad + 1]
+            if crop.size == 0:
+                return ""
+            txt, score = self.ocr.line(crop)
+            txt = txt.strip()
+            return txt if score > 0.5 and self._is_label_text(txt) else ""
+
+        for a, b in words(first[1], first[2]):
+            cx = x0 + (a + b) / 2
+            i = int(np.argmin(np.abs(centers - cx)))
+            if abs(centers[i] - cx) <= 0.6 * pitch:
+                name = read(first[1], first[2], a, b)
+                if name:
+                    bars[i].label = f"{bars[i].label} {name}".strip()
+
+        # second-level group labels
+        later = [b for b in bands if b[1] > first[2]]
+        for k, (kind, s, e) in enumerate(later[:3]):
+            if kind != "text" or s - first[2] > 4 * char_h:
                 continue
-            for bar in panel.bars:
-                if span[0] - 5 <= (bar.x1 + bar.x2) / 2 <= span[1] + 5:
-                    bar.label = f"{text.strip()} {bar.label}".strip()
+            brackets = [bb for bb in later[:k] if bb[0] == "bracket"]
+            for a, b in words(s, e):
+                name = read(s, e, a, b)
+                if not name:
+                    continue
+                cx = (a + b) / 2
+                span = None
+                for _, bs, be in brackets:
+                    for y in range(bs, be + 1):
+                        for ra, rb in _runs(text[y]):
+                            if ra - 3 <= cx <= rb + 3 and rb - ra > 0.6 * pitch:
+                                span = (x0 + ra, x0 + rb)
+                if span is None:
+                    continue
+                for bar, c in zip(bars, centers):
+                    if span[0] - 3 <= c <= span[1] + 3:
+                        bar.label = f"{name} {bar.label}".strip()
 
     @staticmethod
     def _bracket_span(dark, cx, label_top, axis_y) -> Optional[Tuple[int, int]]:
@@ -610,19 +817,39 @@ class FigureExtractor:
         return None
 
     def _read_y_title(self, image, panel: Panel) -> str:
+        """
+        The rotated y-axis title: the column of ink just left of the tick
+        labels. Cropped tightly and read with recognition only (running text
+        detection on every panel was the main cost of a batch run).
+        """
+        H = image.shape[0]
         label_left = int(panel.label_left if panel.label_left is not None else panel.axis_x - 60)
         x2 = max(0, label_left - 3)
-        x1 = max(0, x2 - 90)
-        y1, y2 = int(panel.plot_top), int(panel.axis_y)
-        crop = image[y1:y2, x1:x2]
-        if crop.size == 0:
+        x1 = max(0, x2 - 110)
+        span = panel.axis_y - panel.plot_top
+        y1, y2 = int(max(0, panel.plot_top - 0.35 * span)), int(min(H, panel.axis_y + 0.2 * span))
+        gray = cv2.cvtColor(image[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
+        if gray.size == 0:
             return ""
-        rotated = cv2.rotate(crop, cv2.ROTATE_90_CLOCKWISE)
-        boxes = self.ocr.boxes(rotated)
-        if not boxes:
+        ink = gray < DARK_THRESHOLD
+        cols = ink.sum(axis=0) > 2
+        runs = [r for r in _runs(cols) if r[1] - r[0] >= 8]
+        if not runs:
             return ""
-        # the title is the longest text line
-        return max(boxes, key=lambda b: len(b[1]))[1].strip()
+        c1, c2 = runs[-1]                          # nearest band to the tick labels
+        rows = np.where(ink[:, c1:c2 + 1].any(axis=1))[0]
+        # keep the longest vertical stretch without big gaps (drops stray marks)
+        segs, start = [], rows[0]
+        for a, b in zip(rows[:-1], rows[1:]):
+            if b - a > 2 * (c2 - c1 + 1):
+                segs.append((start, a))
+                start = b
+        segs.append((start, rows[-1]))
+        r1, r2 = max(segs, key=lambda s: s[1] - s[0])
+        pad = 4
+        crop = image[y1 + max(0, r1 - pad): y1 + r2 + pad + 1, x1 + max(0, c1 - pad): x1 + c2 + pad + 1]
+        text, score = self.ocr.line(cv2.rotate(crop, cv2.ROTATE_90_CLOCKWISE))
+        return text.strip() if score > 0.5 else ""
 
     def _assign_legend_labels(self, image, dark, panels: List[Panel], text_boxes) -> None:
         """For panels without x-axis labels, match bar fill colours to legend swatches."""

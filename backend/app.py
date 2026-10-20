@@ -20,6 +20,7 @@ import os
 from config import UPLOAD_DIR, SECRET_KEY, HOST, PORT, DEBUG
 from model_manager import model_manager
 from routes import handle_bar_analyzer, handle_update_values, handle_update_box_coordinates, handle_uploaded_file, handle_calculate_heights, handle_update_bar_names, handle_update_box_category, handle_add_new_box, handle_remove_box
+from extract_routes import handle_extract, handle_export, handle_job_file
 
 
 def create_app() -> Flask:
@@ -163,12 +164,17 @@ def register_routes(app: Flask) -> None:
         methods=['POST']
     )
     
-    # File serving route
+    # Batch figure extraction (PDFs or images -> every bar-chart panel)
+    app.add_url_rule('/api/extract', 'extract', handle_extract, methods=['POST'])
+    app.add_url_rule('/api/export', 'export', handle_export, methods=['POST'])
+
+    # File serving routes
     app.add_url_rule(
         '/static/uploads/<filename>',
         'uploaded_file',
         handle_uploaded_file
     )
+    app.add_url_rule('/static/jobs/<job>/<filename>', 'job_file', handle_job_file)
 
 
 def register_error_handlers(app: Flask) -> None:

@@ -2996,3 +2996,9 @@ html {
     padding: var(--spacing-lg);
   }
 }
+/* Batch Extract: panel overlay (pointer drags must not scroll the page) */
+.panel-svg {
+  touch-action: none;
+  background: #fff;
+  max-height: 460px;
+}

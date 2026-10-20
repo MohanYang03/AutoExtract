@@ -1,0 +1,112 @@
+"""
+Batch extraction API.
+
+POST /api/extract   multipart `file` (PDF or image) -> every bar-chart panel found
+POST /api/export    JSON {figures: [...]} (possibly edited)  -> .xlsx download
+
+Unlike the single-image bar analyzer, these endpoints keep no per-user state on
+the server: results go back to the browser, and edits come back with the export
+request. Figure images are written under static/jobs/<job id>/.
+"""
+
+from __future__ import annotations
+
+import io
+import os
+import tempfile
+import threading
+import uuid
+from typing import Any, Dict, Tuple
+
+import cv2
+from flask import request, send_file, send_from_directory
+from werkzeug.utils import secure_filename
+
+from config import BASE_DIR
+from exporter import PanelResult, build_workbook, paper_id_from_path
+from figure_extractor import FigureExtractor, Panel
+
+JOBS_DIR = os.path.join(BASE_DIR, "static", "jobs")
+EXTRACT_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp"}
+
+_extractor: FigureExtractor | None = None
+_lock = threading.Lock()
+
+
+def _get_extractor() -> FigureExtractor:
+    global _extractor
+    with _lock:
+        if _extractor is None:
+            _extractor = FigureExtractor()
+    return _extractor
+
+
+def handle_extract() -> Tuple[Dict[str, Any], int]:
+    from batch_extract import figures_in
+
+    file = request.files.get("file")
+    if not file or not file.filename:
+        return {"error": "No file uploaded"}, 400
+    name = secure_filename(file.filename)
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if ext not in EXTRACT_EXTENSIONS:
+        return {"error": f"Unsupported file type: .{ext}"}, 400
+
+    job = request.form.get("job") or uuid.uuid4().hex
+    if not job.isalnum():
+        return {"error": "Invalid job id"}, 400
+    job_dir = os.path.join(JOBS_DIR, job)
+    os.makedirs(job_dir, exist_ok=True)
+
+    fd, tmp = tempfile.mkstemp(suffix="." + ext)
+    os.close(fd)
+    try:
+        file.save(tmp)
+        extractor = _get_extractor()
+        figures = []
+        for page, fig, img in figures_in(tmp):
+            with _lock:   # OCR sessions are shared; keep one extraction at a time
+                panels = extractor.extract(img)
+            if not panels:
+                continue
+            fig_id = uuid.uuid4().hex[:10]
+            cv2.imwrite(os.path.join(job_dir, f"{fig_id}.png"), img)
+            figures.append({
+                "id": fig_id,
+                "source": file.filename,
+                "page": page,
+                "figure": fig,
+                "paper_id": paper_id_from_path(file.filename),
+                "image_url": f"/static/jobs/{job}/{fig_id}.png",
+                "width": int(img.shape[1]),
+                "height": int(img.shape[0]),
+                "panels": [p.to_dict() for p in panels],
+            })
+        return {"job": job, "source": file.filename, "figures": figures}, 200
+    except Exception as e:
+        return {"error": f"Extraction failed: {e}"}, 500
+    finally:
+        os.remove(tmp)
+
+
+def handle_export():
+    data = request.get_json(silent=True) or {}
+    results = []
+    for fig in data.get("figures", []):
+        for pd in fig.get("panels", []):
+            if pd.get("excluded"):
+                continue
+            results.append(PanelResult(source=fig.get("source", ""), page=fig.get("page", -1),
+                                       figure=fig.get("figure", ""), panel=Panel.from_dict(pd),
+                                       paper_id=fig.get("paper_id")))
+    if not results:
+        return {"error": "Nothing to export"}, 400
+    buf = io.BytesIO()
+    build_workbook(results).save(buf)
+    buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name=data.get("filename") or "extracted.xlsx",
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+def handle_job_file(job: str, filename: str):
+    return send_from_directory(os.path.join(JOBS_DIR, secure_filename(job)), secure_filename(filename))

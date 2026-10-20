@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
 import BarAnalyzer from './components/BarAnalyzer';
+import BatchExtractor from './components/BatchExtractor';
 import 'bootstrap/dist/css/bootstrap.min.css';
 
 
@@ -65,6 +66,9 @@ const HomePage = () => (
         <div className="hero-actions">
           <Link to="/tutorial" className="btn btn-primary me-3">
             <i className="bi bi-play-circle me-2"></i>Start Learning
+          </Link>
+          <Link to="/extract" className="btn btn-primary me-3">
+            <i className="bi bi-files me-2"></i>Batch Extract Papers
           </Link>
           <Link to="/bar_analyzer" className="btn btn-outline-primary">
             <i className="bi bi-graph-up me-2"></i>Try Bar Analyzer
@@ -737,6 +741,7 @@ function App() {
             <ul className="navbar-nav">
               <li className="nav-item"><Link className="nav-link" to="/">Home</Link></li>
               <li className="nav-item"><Link className="nav-link" to="/tutorial">Tutorial</Link></li>
+              <li className="nav-item"><Link className="nav-link" to="/extract">Batch Extract</Link></li>
               <li className="nav-item"><Link className="nav-link" to="/bar_analyzer">Bar Analyzer</Link></li>
               <li className="nav-item"><Link className="nav-link" to="/box_analyzer">Box Analyzer</Link></li>
               <li className="nav-item"><Link className="nav-link" to="/line_analyzer">Line Analyzer</Link></li>
@@ -749,6 +754,7 @@ function App() {
       <div className="container-fluid content mt-4">
         <Routes>
           <Route path="/bar_analyzer" element={<BarAnalyzer />} />
+          <Route path="/extract" element={<BatchExtractor />} />
           <Route path="/tutorial" element={<TutorialPage />} />
           <Route path="/" element={<HomePage />} />
         </Routes>

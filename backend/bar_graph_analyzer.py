@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import pathlib
+
 import cv2
 import torch
 import pytesseract
@@ -32,13 +35,21 @@ class BarGraphAnalyzer:
         if pytesseract_cmd:
             pytesseract.pytesseract.tesseract_cmd = pytesseract_cmd
 
-        # Load YOLOv5 custom model from torch hub (repo is cached after first download; Docker image pre-warms this)
-        self.model: Any = torch.hub.load(
-            'ultralytics/yolov5',
-            'custom',
-            path=model_path,
-            trust_repo=True,
-        )
+        # Load YOLOv5 custom model from torch hub (repo is cached after first download; Docker image pre-warms this).
+        # best.pt was pickled on macOS/Linux and contains PosixPath objects, which can't be
+        # instantiated on Windows; map them to WindowsPath for the duration of the load.
+        posix_path = pathlib.PosixPath
+        if os.name == "nt":
+            pathlib.PosixPath = pathlib.WindowsPath
+        try:
+            self.model: Any = torch.hub.load(
+                'ultralytics/yolov5',
+                'custom',
+                path=model_path,
+                trust_repo=True,
+            )
+        finally:
+            pathlib.PosixPath = posix_path
         self.class_names = class_names
 
         # Runtime state populated per image
@@ -585,6 +596,20 @@ class BarGraphAnalyzer:
             print(f"Error changing box category: {e}")
             return False
 
+    def _next_index(self, prefix: str) -> int:
+        """
+        Next unused number for an ID like 'bar_N'. Counting the dict (len + 1)
+        reused live IDs after a deletion and silently overwrote a box; boxes
+        also keep their old ID when their category changes, so check every dict.
+        """
+        used = [0]
+        for category_dict in self._category_dicts:
+            for box_id in category_dict:
+                head, _, tail = box_id.rpartition('_')
+                if head == prefix and tail.isdigit():
+                    used.append(int(tail))
+        return max(used) + 1
+
     def add_new_box(self, box_data: Dict[str, Any]) -> str:
         """
         Add a new detection box to the appropriate category.
@@ -613,34 +638,34 @@ class BarGraphAnalyzer:
             # Generate a unique ID for the new box
             label = new_box['label']
             if label == 'bar':
-                new_id = f"bar_{len(self.bars) + 1}"
+                new_id = f"bar_{self._next_index('bar')}"
                 self.bars[new_id] = new_box
             elif label == 'uptail':
-                new_id = f"uptail_{len(self.uptails) + 1}"
+                new_id = f"uptail_{self._next_index('uptail')}"
                 self.uptails[new_id] = new_box
             elif label == 'yaxis':
-                new_id = f"yaxis_{len(self.yaxis) + 1}"
+                new_id = f"yaxis_{self._next_index('yaxis')}"
                 self.yaxis[new_id] = new_box
             elif label == 'xaxis':
-                new_id = f"xaxis_{len(self.xaxis) + 1}"
+                new_id = f"xaxis_{self._next_index('xaxis')}"
                 self.xaxis[new_id] = new_box
             elif label == 'origin':
-                new_id = f"origin_{len(self.origins) + 1}"
+                new_id = f"origin_{self._next_index('origin')}"
                 self.origins[new_id] = new_box
             elif label == 'ymax':
-                new_id = f"ymax_{len(self.ymaxes) + 1}"
+                new_id = f"ymax_{self._next_index('ymax')}"
                 self.ymaxes[new_id] = new_box
             elif label == 'label':
-                new_id = f"label_{len(self.labels) + 1}"
+                new_id = f"label_{self._next_index('label')}"
                 self.labels[new_id] = new_box
             elif label == 'x_group':
-                new_id = f"x_group_{len(self.x_groups) + 1}"
+                new_id = f"x_group_{self._next_index('x_group')}"
                 self.x_groups[new_id] = new_box
             elif label == 'legend':
-                new_id = f"legend_{len(self.legends) + 1}"
+                new_id = f"legend_{self._next_index('legend')}"
                 self.legends[new_id] = new_box
             elif label == 'legend_group':
-                new_id = f"legend_group_{len(self.legend_groups) + 1}"
+                new_id = f"legend_group_{self._next_index('legend_group')}"
                 self.legend_groups[new_id] = new_box
             else:
                 print(f"Unknown label: {label}")

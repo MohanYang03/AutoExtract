@@ -24,16 +24,48 @@ sys.path.insert(0, os.path.join(HERE, "..", "backend"))
 from pdf_utils import page_images  # noqa: E402
 
 
-def load_truth(path):
+def load_truth(path, error_type="auto"):
+    """
+    [(group, mean, cap)] from a hand-digitized long-format sheet.
+
+    The cap is what the figure's error bar actually shows. Sheets record it as
+    'mean+sem' or 'mean+sd'; some only record sd and n. With error_type='auto'
+    returns both candidates via load_truth_both().
+    """
+    rows_sem, rows_sd = load_truth_both(path)
+    if error_type == "sd":
+        return rows_sd
+    return rows_sem if rows_sem else rows_sd
+
+
+def load_truth_both(path):
+    """(rows with cap = mean+SEM, rows with cap = mean+SD); either may be empty."""
     ws = openpyxl.load_workbook(path, data_only=True).active
     rows = list(ws.iter_rows(values_only=True))
-    hdr = [str(h).strip() if h else "" for h in rows[0]]
-    i_mean, i_top, i_grp = hdr.index("mean"), hdr.index("mean+sem"), hdr.index("treatment_group")
-    out = []
+    hdr = [str(h).strip().lower() if h else "" for h in rows[0]]
+    col = {h: i for i, h in enumerate(hdr) if h}
+    i_mean, i_grp = col["mean"], col.get("treatment_group")
+    sem_rows, sd_rows = [], []
     for r in rows[1:]:
-        if isinstance(r[i_mean], (int, float)):
-            out.append((r[i_grp], float(r[i_mean]), float(r[i_top])))
-    return out
+        if not isinstance(r[i_mean], (int, float)):
+            continue
+        get = lambda name: r[col[name]] if name in col and isinstance(r[col[name]], (int, float)) else None
+        mean, sd, sem, n = float(r[i_mean]), get("sd"), get("sem"), get("sample_size")
+        grp = r[i_grp] if i_grp is not None else ""
+        top_sem = get("mean+sem")
+        top_sd = get("mean+sd")
+        if top_sem is None and sem is not None:
+            top_sem = mean + sem
+        if top_sd is None and sd is not None:
+            top_sd = mean + sd
+        if top_sem is None and sd is not None and n:
+            top_sem = mean + sd / n ** 0.5
+        if top_sem is not None:
+            sem_rows.append((grp, mean, float(top_sem)))
+        if top_sd is not None:
+            sd_rows.append((grp, mean, float(top_sd)))
+    n_rows = sum(isinstance(r[i_mean], (int, float)) for r in rows[1:])
+    return (sem_rows if len(sem_rows) == n_rows else [], sd_rows if len(sd_rows) == n_rows else [])
 
 
 def run_new(img, point, extractor):

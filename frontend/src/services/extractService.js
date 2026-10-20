@@ -5,17 +5,27 @@
 const API_BASE = '/api';
 
 /**
- * Upload one PDF or image and get back every bar-chart panel found in it
+ * Upload one PDF or image and get back every chart panel found in it
  * @param {File} file - PDF or image
- * @param {string} [job] - job id from a previous call, so images share a folder
- * @returns {Promise<Object>} {job, source, figures: [...]}
+ * @param {Object} params
+ * @param {string} [params.job] - job id from a previous call, so images share a folder
+ * @param {Object} [params.options] - {bar_names, titles, legend_colors}
+ * @param {string} [params.errorType] - 'sem' | 'sd' to override captions, or '' for auto
+ * @returns {Promise<Object>} {job, source, figures: [...], seconds}
  */
-export const extractFile = async (file, job) => {
+export const extractFile = async (file, { job, options, errorType } = {}) => {
     const formData = new FormData();
     formData.append('file', file);
     if (job) formData.append('job', job);
+    if (options) formData.append('options', JSON.stringify(options));
+    if (errorType) formData.append('error_type', errorType);
 
-    const response = await fetch(`${API_BASE}/extract`, { method: 'POST', body: formData });
+    let response;
+    try {
+        response = await fetch(`${API_BASE}/extract`, { method: 'POST', body: formData });
+    } catch {
+        throw new Error('Network error: unable to reach the backend server');
+    }
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
         throw new Error(data.error || `HTTP ${response.status}: ${response.statusText}`);
@@ -42,6 +52,8 @@ export const downloadWorkbook = async (figures, filename = 'extracted.xlsx') => 
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
     link.download = filename;
+    document.body.appendChild(link);
     link.click();
-    URL.revokeObjectURL(link.href);
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
 };

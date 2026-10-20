@@ -8,13 +8,14 @@ import cv2
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
 from exporter import draw_overlay  # noqa: E402
 from figure_extractor import FigureExtractor  # noqa: E402
-from pdf_utils import figure_number, page_images  # noqa: E402
+from pdf_utils import figures  # noqa: E402
 
 pdf, want, dst = sys.argv[1], sys.argv[2], sys.argv[3]
 crop = [int(v) for v in sys.argv[4:8]] if len(sys.argv) >= 8 else None
 ex = FigureExtractor()
-for page, img in page_images(pdf):
-    if figure_number(pdf, page) != want:
+for f in figures(pdf):
+    page, img = f["page"], f["image"]
+    if f["figure"] != want:
         continue
     panels = ex.extract(img)
     print(f"page {page} size {img.shape[1]}x{img.shape[0]}")

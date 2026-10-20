@@ -29,15 +29,16 @@ from run_eval import load_truth_both  # noqa: E402
 
 
 def extract_folder(folder, extractor):
-    from pdf_utils import figure_number, page_images
+    from batch_extract import extract_file
+    from figure_extractor import ExtractOptions
     out = []
     for pdf in glob.glob(os.path.join(folder, "*.pdf")):
-        for page, img in page_images(pdf):
-            fig = figure_number(pdf, page)
-            for p in extractor.extract(img):
+        for fig, panels in extract_file(pdf, extractor, ExtractOptions()):
+            for p in panels:
                 lo, hi = p.value_at(p.axis_y), p.value_at(p.plot_top)
-                out.append(dict(pdf=os.path.basename(pdf), page=page, figure=fig, letter=p.letter,
-                                title=p.y_title, lo=lo, hi=hi,
+                out.append(dict(pdf=os.path.basename(pdf), page=fig["page"], figure=fig["figure"],
+                                letter=p.letter, title=p.y_title, kind=p.kind, error_type=p.error_type,
+                                lo=lo, hi=hi,
                                 bars=[(b.label, b.mean, b.mean_plus_err, b.uncertain) for b in p.bars]))
     return out
 

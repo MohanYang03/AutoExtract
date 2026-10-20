@@ -60,24 +60,41 @@ def _sheet_title(base: str, used: set) -> str:
     return candidate
 
 
+def long_header(error_type: str) -> List[str]:
+    """LONG_COLUMNS with the last column named after what the error bars show."""
+    return LONG_COLUMNS[:-1] + ["mean+sd" if error_type == "sd" else "mean+sem"]
+
+
 def _write_long_rows(ws, start_row: int, result: PanelResult, first_col: int = 1) -> int:
-    """Write one row per bar in LONG_COLUMNS order. Returns the next free row."""
+    """
+    Write one row per bar in LONG_COLUMNS order. Returns the next free row.
+
+    The measured error goes in its own column (sem or sd, per the panel's
+    error_type); the other is a formula on sample_size, so it fills in as
+    soon as n is typed.
+    """
     r = start_row
     col = {name: first_col + i for i, name in enumerate(LONG_COLUMNS)}
+    is_sd = result.panel.error_type == "sd"
     for bar in result.panel.bars:
         mean = bar.mean
         top = bar.mean_plus_err if bar.mean_plus_err is not None else mean
-        sem = None if mean is None or top is None else top - mean
-        ws.cell(r, col["mean"], mean)
-        sem_ref = f"{get_column_letter(col['sem'])}{r}"
+        err = None if mean is None or top is None else top - mean
         n_ref = f"{get_column_letter(col['sample_size'])}{r}"
-        ws.cell(r, col["sd"], f'=IF({n_ref}="","",{sem_ref}*SQRT({n_ref}))')
+        sem_ref = f"{get_column_letter(col['sem'])}{r}"
+        sd_ref = f"{get_column_letter(col['sd'])}{r}"
+        ws.cell(r, col["mean"], mean)
+        if is_sd:
+            ws.cell(r, col["sd"], err)
+            ws.cell(r, col["sem"], f'=IF({n_ref}="","",{sd_ref}/SQRT({n_ref}))')
+        else:
+            ws.cell(r, col["sem"], err)
+            ws.cell(r, col["sd"], f'=IF({n_ref}="","",{sem_ref}*SQRT({n_ref}))')
         ws.cell(r, col["treatment_group"], bar.label)
         if bar.n:
             ws.cell(r, col["sample_size"], bar.n)
         if result.paper_id is not None:
             ws.cell(r, col["paper_id"], result.paper_id)
-        ws.cell(r, col["sem"], sem)
         ws.cell(r, col["mean+sem"], top)
         if bar.uncertain:
             for c in range(first_col, first_col + len(LONG_COLUMNS)):
@@ -90,14 +107,16 @@ def build_workbook(results: List[PanelResult]) -> Workbook:
     wb = Workbook()
     summary = wb.active
     summary.title = "Summary"
-    summary.append(["source", "figure", "panel", "y-axis title", "bars", "ticks used",
-                    "flagged bars", "warnings", "sheet"])
+    summary.append(["source", "figure", "panel", "y-axis title", "chart", "error bars", "bars",
+                    "ticks used", "flagged bars", "warnings", "sheet"])
     for c in summary[1]:
         c.font = HEADER_FONT
 
     # One combined sheet: context columns, then the 12 long-format columns.
+    # Panels may mix SEM and SD, so the last column is "mean+error" here.
     combined = wb.create_sheet("All bars")
-    combined.append(["source", "figure", "panel", "y-axis title", "check"] + LONG_COLUMNS)
+    combined.append(["source", "figure", "panel", "y-axis title", "error bars", "check"]
+                    + LONG_COLUMNS[:-1] + ["mean+error"])
     for c in combined[1]:
         c.font = HEADER_FONT
 
@@ -107,7 +126,7 @@ def build_workbook(results: List[PanelResult]) -> Workbook:
         p = res.panel
         title = _sheet_title(f"{res.name} {p.y_title}".strip(), used)
         ws = wb.create_sheet(title)
-        ws.append(LONG_COLUMNS + ["", "check"])
+        ws.append(long_header(p.error_type) + ["", "check"])
         for c in ws[1]:
             c.font = HEADER_FONT
         _write_long_rows(ws, 2, res)
@@ -122,11 +141,12 @@ def build_workbook(results: List[PanelResult]) -> Workbook:
             combined.cell(row, 2, res.figure)
             combined.cell(row, 3, p.letter)
             combined.cell(row, 4, p.y_title)
-            combined.cell(row, 5, "check error bar" if bar.uncertain else "")
-        next_combined = _write_long_rows(combined, next_combined, res, first_col=6)
+            combined.cell(row, 5, p.error_type.upper())
+            combined.cell(row, 6, "check error bar" if bar.uncertain else "")
+        next_combined = _write_long_rows(combined, next_combined, res, first_col=7)
 
-        summary.append([res.source, res.figure, p.letter, p.y_title, len(p.bars),
-                        f"{p.calibration_inliers}/{len(p.ticks)}",
+        summary.append([res.source, res.figure, p.letter, p.y_title, p.kind, p.error_type.upper(),
+                        len(p.bars), f"{p.calibration_inliers}/{len(p.ticks)}",
                         sum(b.uncertain for b in p.bars), "; ".join(p.warnings), title])
 
     for ws in (summary, combined):
@@ -145,9 +165,13 @@ def draw_overlay(image: np.ndarray, panels: List[Panel]) -> np.ndarray:
         for ty, val, _ in p.ticks:
             color = (0, 170, 0) if val is not None else (0, 0, 255)
             cv2.circle(out, (int(p.axis_x) + 8, int(ty)), 4, color, -1)
-        for b in p.bars:
-            cv2.rectangle(out, (b.x1, int(round(b.top_px))), (b.x2, int(p.axis_y)), orange, 2)
+        for i, b in enumerate(p.bars, 1):
+            if p.kind == "dot":
+                cv2.line(out, (b.x1, int(round(b.top_px))), (b.x2, int(round(b.top_px))), orange, 3)
+            else:
+                cv2.rectangle(out, (b.x1, int(round(b.top_px))), (b.x2, int(p.axis_y)), orange, 2)
             cx = (b.x1 + b.x2) // 2
+            cv2.putText(out, str(i), (cx - 5, int(p.axis_y) - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, orange, 2)
             if b.cap_px is not None:
                 cap_color = (0, 0, 255) if b.uncertain else blue
                 cv2.line(out, (cx - 14, int(round(b.cap_px))), (cx + 14, int(round(b.cap_px))), cap_color, 3)

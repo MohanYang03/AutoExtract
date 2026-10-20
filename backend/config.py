@@ -6,7 +6,7 @@ used throughout the application.
 """
 
 import os
-from typing import List
+
 
 # Base directory configuration
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

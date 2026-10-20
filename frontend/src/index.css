@@ -2996,9 +2996,32 @@ html {
     padding: var(--spacing-lg);
   }
 }
-/* Batch Extract: panel overlay (pointer drags must not scroll the page) */
-.panel-svg {
-  touch-action: none;
+/* Batch Extract */
+.batch-extract .drop-zone {
+  border: 2px dashed #adb5bd;
+  background: #fff;
+  transition: background-color .15s, border-color .15s;
+}
+.batch-extract .drop-zone.active {
+  border-color: #0d6efd;
+  background: #f1f6ff;
+}
+.batch-extract .results-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: #fff;
+}
+.batch-extract .panel-svg {
+  touch-action: none;   /* pointer drags must not scroll the page */
   background: #fff;
   max-height: 460px;
+  outline: none;
+}
+.batch-extract .panel-svg:focus-visible {
+  box-shadow: 0 0 0 .2rem rgba(13, 110, 253, .35);
+}
+.batch-extract .panel-card .table td,
+.batch-extract .panel-card .table th {
+  white-space: nowrap;
 }

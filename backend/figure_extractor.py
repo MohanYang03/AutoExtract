@@ -36,6 +36,20 @@ TEXT_THRESHOLD = 200      # gray < this counts as text when cropping labels
 # Data model
 # --------------------------------------------------------------------------- #
 
+def _plain(obj):
+    if isinstance(obj, dict):
+        return {k: _plain(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_plain(v) for v in obj]
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        v = float(obj)
+        return v if np.isfinite(v) else None
+    if isinstance(obj, float) and not np.isfinite(obj):
+        return None
+    return obj
+
 @dataclass
 class Bar:
     x1: int
@@ -74,6 +88,8 @@ class Panel:
     bars: List[Bar] = field(default_factory=list)
     y_title: str = ""
     letter: str = ""          # panel letter ("A", "B", ...) if one was found
+    kind: str = "bar"         # "bar", or "dot" for mean-line-and-whisker scatter plots
+    error_type: str = "sem"   # what the error bars show: "sem" or "sd" (from the caption, editable)
     warnings: List[str] = field(default_factory=list)
 
     def value_at(self, py: float) -> Optional[float]:
@@ -82,10 +98,11 @@ class Panel:
         return self.slope * py + self.intercept
 
     def to_dict(self) -> dict:
+        """JSON-ready dict (numpy scalars from OpenCV converted to plain Python)."""
         d = asdict(self)
         for b, bd in zip(self.bars, d["bars"]):
             bd["err"] = b.err
-        return d
+        return _plain(d)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Panel":
@@ -393,6 +410,11 @@ class FigureExtractor:
 
         line_w = max(1, axis_h)
         panel.bars = self._find_bars(image, gray, dark, ink, axis_left + axis_w, right, top, axis_y, line_w)
+        if not panel.bars:
+            # scatter/dot plot: mean line with error whiskers, no bars
+            panel.bars = self._find_dot_groups(ink, axis_left + axis_w, right, top, axis_y, line_w)
+            if panel.bars:
+                panel.kind = "dot"
         for bar in panel.bars:
             bar.mean = panel.value_at(bar.top_px)
             bar.mean_plus_err = panel.value_at(bar.cap_px) if bar.cap_px is not None else bar.mean
@@ -578,6 +600,102 @@ class FigureExtractor:
             bars[-1]._caps = cap_candidates
         self._choose_caps(bars, line_w)
         return bars
+
+    def _find_dot_groups(self, ink, x_lo, x_hi, top, axis_y, line_w) -> List[Bar]:
+        """
+        Dot plots draw each group's mean as a short horizontal line, with a
+        narrower cap above it joined by a vertical whisker. Find horizontal
+        segments, group them by centre, and read mean and upper cap.
+        """
+        y_hi = int(axis_y) - line_w - 1
+        if y_hi - top < 20 or x_hi - x_lo < 20:
+            return []
+        region = ink[top:y_hi, x_lo:x_hi + 1]
+        k = max(15, int(0.06 * (x_hi - x_lo)))
+        opened = cv2.morphologyEx(region, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (k, 1)))
+        n, _, stats, _ = cv2.connectedComponentsWithStats(opened, connectivity=8)
+        segs = []
+        for i in range(1, n):
+            x, y, w, h, _ = stats[i]
+            if h > 2 * line_w + 4:
+                continue
+            x1, x2, yc = x_lo + x, x_lo + x + w - 1, top + y + (h - 1) / 2.0
+            # significance brackets turn down at both ends
+            ends_down = all(ink[int(yc) + line_w + 2: int(yc) + line_w + 8, ex].mean() > 0.5
+                            for ex in (x1 + 1, x2 - 1)) if int(yc) + line_w + 8 < ink.shape[0] else False
+            if not ends_down:
+                segs.append(dict(x1=x1, x2=x2, yc=yc, w=w))
+        if not segs:
+            return []
+        # brackets span several groups: far wider than the typical segment
+        typical = float(np.median([s["w"] for s in segs]))
+        segs = [s for s in segs if s["w"] <= 2.2 * typical]
+        if not segs:
+            return []
+        widest = max(s["w"] for s in segs)
+        groups: List[List[dict]] = []
+        for s in sorted(segs, key=lambda s: (s["x1"] + s["x2"]) / 2):
+            c = (s["x1"] + s["x2"]) / 2
+            for g in groups:
+                gc = np.mean([(t["x1"] + t["x2"]) / 2 for t in g])
+                if abs(gc - c) <= 0.25 * widest + 3:
+                    g.append(s)
+                    break
+            else:
+                groups.append([s])
+
+        bars = []
+        for g in groups:
+            mean_line = max(g, key=lambda s: s["w"])
+            if mean_line["w"] < 0.5 * widest:
+                continue
+            cx = int(round((mean_line["x1"] + mean_line["x2"]) / 2))
+            cap = self._dot_cap(ink, cx, mean_line, line_w, top)
+            bar = Bar(x1=int(mean_line["x1"]), x2=int(mean_line["x2"]), top_px=float(mean_line["yc"]),
+                      cap_px=float(cap) if cap is not None else float(mean_line["yc"]))
+            bar.uncertain = cap is None
+            bars.append(bar)
+        # a lone segment is more likely a stray line than a plot; mean lines
+        # in one panel are drawn at one width
+        if len(bars) < 2:
+            return []
+        widths = np.array([b.x2 - b.x1 for b in bars], dtype=float)
+        if widths.max() > 1.4 * widths.min():
+            return []
+        return bars
+
+    @staticmethod
+    def _dot_cap(ink, cx, mean_line, line_w, plot_top) -> Optional[float]:
+        """Walk up the whisker from a mean line; the cap is a centred horizontal run where it ends."""
+        w = mean_line["x2"] - mean_line["x1"] + 1
+        y = int(mean_line["yc"]) - line_w - 1
+        # pick the whisker column (it may sit a pixel or two off centre)
+        col = max(range(cx - 2, cx + 3), key=lambda c: ink[max(plot_top, y - 6): y, c].sum())
+        end, gap = None, 0
+        while y >= plot_top:
+            if ink[y, col]:
+                end, gap = y, 0
+            else:
+                gap += 1
+                if gap > 1:
+                    break
+            y -= 1
+        if end is None or mean_line["yc"] - end < line_w + 2:
+            return None
+        # topmost row near the whisker end with a centred run of cap width
+        for yy in range(end, min(end + 3 * line_w + 4, int(mean_line["yc"]))):
+            row = ink[yy]
+            l = r = col
+            while l > col - w and row[l - 1]:
+                l -= 1
+            while r < col + w and row[r + 1]:
+                r += 1
+            if 0.15 * w <= r - l + 1 <= 1.2 * w and abs((l + r) / 2 - col) <= max(2, 0.15 * w):
+                band = [yy]
+                while band[-1] + 1 < ink.shape[0] and ink[band[-1] + 1, l:r + 1].mean() > 0.8:
+                    band.append(band[-1] + 1)
+                return float(np.mean(band))
+        return None
 
     def _cap_candidates(self, dark, bar_top_y, x1, x2, line_w, plot_top) -> dict:
         """

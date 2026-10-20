@@ -12,9 +12,11 @@ request. Figure images are written under static/jobs/<job id>/.
 from __future__ import annotations
 
 import io
+import json
 import os
 import tempfile
 import threading
+import time
 import uuid
 from typing import Any, Dict, Tuple
 
@@ -24,7 +26,7 @@ from werkzeug.utils import secure_filename
 
 from config import BASE_DIR
 from exporter import PanelResult, build_workbook, paper_id_from_path
-from figure_extractor import FigureExtractor, Panel
+from figure_extractor import ExtractOptions, FigureExtractor, Panel
 
 JOBS_DIR = os.path.join(BASE_DIR, "static", "jobs")
 EXTRACT_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp"}
@@ -42,7 +44,7 @@ def _get_extractor() -> FigureExtractor:
 
 
 def handle_extract() -> Tuple[Dict[str, Any], int]:
-    from batch_extract import figures_in
+    from batch_extract import extract_file
 
     file = request.files.get("file")
     if not file or not file.filename:
@@ -58,31 +60,42 @@ def handle_extract() -> Tuple[Dict[str, Any], int]:
     job_dir = os.path.join(JOBS_DIR, job)
     os.makedirs(job_dir, exist_ok=True)
 
+    try:
+        options = ExtractOptions.from_dict(json.loads(request.form.get("options") or "{}"))
+    except (ValueError, TypeError):
+        return {"error": "Invalid options"}, 400
+    error_type = request.form.get("error_type") or None
+    if error_type not in (None, "sem", "sd"):
+        return {"error": "error_type must be 'sem' or 'sd'"}, 400
+
     fd, tmp = tempfile.mkstemp(suffix="." + ext)
     os.close(fd)
     try:
         file.save(tmp)
         extractor = _get_extractor()
+        t0 = time.time()
+        with _lock:   # OCR sessions are shared; keep one extraction at a time
+            found = extract_file(tmp, extractor, options, error_type)
         figures = []
-        for page, fig, img in figures_in(tmp):
-            with _lock:   # OCR sessions are shared; keep one extraction at a time
-                panels = extractor.extract(img)
-            if not panels:
-                continue
+        for fig, panels in found:
+            img = fig["image"]
             fig_id = uuid.uuid4().hex[:10]
-            cv2.imwrite(os.path.join(job_dir, f"{fig_id}.png"), img)
+            # JPEG keeps big scans light to send; quality 92 is visually lossless for review
+            cv2.imwrite(os.path.join(job_dir, f"{fig_id}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
             figures.append({
                 "id": fig_id,
                 "source": file.filename,
-                "page": page,
-                "figure": fig,
+                "page": fig["page"],
+                "figure": fig["figure"],
+                "error_type_from_caption": fig["error_type"],
                 "paper_id": paper_id_from_path(file.filename),
-                "image_url": f"/static/jobs/{job}/{fig_id}.png",
+                "image_url": f"/static/jobs/{job}/{fig_id}.jpg",
                 "width": int(img.shape[1]),
                 "height": int(img.shape[0]),
                 "panels": [p.to_dict() for p in panels],
             })
-        return {"job": job, "source": file.filename, "figures": figures}, 200
+        return {"job": job, "source": file.filename, "figures": figures,
+                "seconds": round(time.time() - t0, 2)}, 200
     except Exception as e:
         return {"error": f"Extraction failed: {e}"}, 500
     finally:

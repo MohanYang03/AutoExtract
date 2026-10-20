@@ -80,3 +80,4 @@ backend/data/
 # Local eval scratch
 eval/_yolo_tmp.png
 eval/out/
+.venv-pinned/

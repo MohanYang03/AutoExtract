@@ -18,7 +18,6 @@ from flask import Flask, abort, jsonify, send_from_directory
 import os
 
 from config import UPLOAD_DIR, SECRET_KEY, HOST, PORT, DEBUG
-from model_manager import model_manager
 from routes import handle_bar_analyzer, handle_update_values, handle_update_box_coordinates, handle_uploaded_file, handle_calculate_heights, handle_update_bar_names, handle_update_box_category, handle_add_new_box, handle_remove_box
 from extract_routes import handle_extract, handle_export, handle_job_file
 
@@ -211,13 +210,10 @@ def main():
     # Create and configure app
     app = create_app()
     
-    # Check if model is ready
-    if not model_manager.is_ready():
-        print("Warning: BarGraphAnalyzer model failed to initialize!")
-        print("The application may not function properly.")
-    else:
-        print("✓ BarGraphAnalyzer model initialized successfully")
-    
+    # The YOLO model for the classic Bar Analyzer loads on its first request;
+    # Batch Extract does not need it.
+    print("Bar Analyzer model loads on first use; Batch Extract is ready.")
+
     # Start the server
     print(f"Starting AutoExtract backend server on {HOST}:{PORT}")
     print(f"Debug mode: {'ON' if DEBUG else 'OFF'}")

@@ -1,0 +1,6 @@
+# Tests and benchmarks (on top of requirements.txt)
+-r requirements.txt
+pytest>=8
+pyflakes>=3
+# headless browser check of the dashboard: then run `python -m playwright install chromium`
+playwright>=1.44

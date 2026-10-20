@@ -339,8 +339,12 @@ class FigureExtractor:
     def _find_letter_glyph(self, image, dark, p: Panel) -> str:
         """Text detection often skips a lone letter; look for a big bold glyph up-left of the plot."""
         H, W = dark.shape
-        x1, x2 = int(max(0, p.axis_x - 0.25 * W)), int(p.axis_x)
-        y1, y2 = int(max(0, p.plot_top - 0.12 * H)), int(p.plot_top + 0.02 * H)
+        # Only just above the plot and close to its tick labels: a wider
+        # search picks up a neighbouring panel's letter or axis-title glyphs,
+        # and a wrong letter mislabels a sheet (no letter is safer).
+        left_edge = p.label_left if p.label_left is not None else p.axis_x - 0.05 * W
+        x1, x2 = int(max(0, left_edge - 0.10 * W)), int(p.axis_x)
+        y1, y2 = int(max(0, p.plot_top - 0.10 * H)), int(p.plot_top + 0.01 * H)
         region = dark[y1:y2, x1:x2]
         if region.size == 0:
             return ""
@@ -351,10 +355,16 @@ class FigureExtractor:
             if 0.012 * H <= h <= 0.05 * H and 0.4 * h <= w <= 1.3 * h and area >= 0.25 * w * h:
                 cands.append((x + y, x, y, w, h))
         for _, x, y, w, h in sorted(cands):
+            # a panel letter stands alone; the first letter of a title word
+            # ("TST", "SPT") has more letters right beside it
+            right = region[max(0, y): y + h, x + w + 1: x + w + 1 + int(1.0 * h)]
+            left = region[max(0, y): y + h, max(0, x - int(0.6 * h)): max(0, x - 1)]
+            if right.any() or left.any():
+                continue
             pad = max(3, h // 4)
             crop = image[y1 + max(0, y - pad): y1 + y + h + pad, x1 + max(0, x - pad): x1 + x + w + pad]
             text, score = self.ocr.line(crop)
-            if re.fullmatch(r"[A-Z]", text.strip()) and score > 0.6:
+            if re.fullmatch(r"[A-Z]", text.strip()) and score > 0.85:
                 return text.strip()
         return ""
 
@@ -456,7 +466,17 @@ class FigureExtractor:
             panel.bars = self._find_bars(image, gray, dark, ink, x_lo, right, top, base_y, line_w, tick_rows)
         if base_y < axis_y - 3 * line_w:
             below = self._find_bars_below(image, gray, dark, ink, x_lo, right, base_y, axis_y, line_w, tick_rows)
-            both = panel.bars + below
+            # A downward bar's outline sits on the zero row and reads as a
+            # sliver of an upward bar (and vice versa): drop near-zero slivers
+            # that share their x-range with a real bar on the other side.
+            def overlaps(a, b):
+                return min(a.x2, b.x2) - max(a.x1, b.x1) > 0.5 * min(a.x2 - a.x1, b.x2 - b.x1)
+            sliver = 2 * line_w + 3
+            up = [b for b in panel.bars
+                  if not (abs(base_y - b.top_px) <= sliver and any(overlaps(b, d) for d in below))]
+            below = [d for d in below
+                     if not (abs(d.top_px - base_y) <= sliver and any(overlaps(d, b) for b in up))]
+            both = up + below
             if both:
                 # bars in one chart share a width; narrower blobs are dots
                 typical = float(np.median([b.x2 - b.x1 for b in both]))
@@ -471,6 +491,8 @@ class FigureExtractor:
             # Real one-bar charts are vanishingly rare; a lone "bar" is far more
             # often a box plot's box or a filled shape, so don't report it.
             return None
+        if panel.kind == "bar" and self._stacked(image, panel.bars, axis_y, line_w):
+            return None                 # stacked bars: the top is a sum, not a group mean
         for bar in panel.bars:
             # the cap lies beyond the mean, away from zero (up for positive bars)
             down = bar.top_px > base_y
@@ -605,6 +627,36 @@ class FigureExtractor:
         # never pad rightwards into the tick or axis line (it reads as "l" or "1")
         crop = image[max(0, gy1 - pad): gy2 + pad + 1, max(0, gx1 - pad): min(gx2 + pad, label_right - 1) + 1]
         return crop, (gx1, gy1, gx2, gy2)
+
+    @staticmethod
+    def _stacked(image, bars: List[Bar], axis_y: float, line_w: int) -> bool:
+        """True when most bars are built from 3+ distinct colour bands (a stacked chart)."""
+        stacked = 0
+        for b in bars:
+            w = b.x2 - b.x1
+            y0, y1 = int(min(b.top_px, axis_y)) + line_w + 2, int(max(b.top_px, axis_y)) - line_w - 2
+            if y1 - y0 < 12 or w < 8:
+                continue
+            block = image[y0:y1, b.x1 + int(0.2 * w): b.x2 - int(0.2 * w)]
+            lab = cv2.cvtColor(block, cv2.COLOR_BGR2LAB).astype(float)
+            # A stack segment fills the bar's width evenly; a scatter dot only
+            # covers part of a row, so keep rows that are uniform across it.
+            uniform = lab.std(axis=1).max(axis=1) < 8
+            row_col = lab.mean(axis=1)
+            min_len = max(4, int(0.03 * (y1 - y0)))
+            colours = []
+            for s, e in _runs(uniform):
+                # split uniform stretches wherever the colour changes
+                start = s
+                for y in range(s + 1, e + 2):
+                    if y == e + 1 or np.linalg.norm(row_col[y] - row_col[start]) > 20:
+                        if y - start >= min_len:
+                            c = row_col[start:y].mean(axis=0)
+                            if all(np.linalg.norm(c - o) > 20 for o in colours):
+                                colours.append(c)
+                        start = y
+            stacked += len(colours) >= 3
+        return stacked > len(bars) / 2
 
     def _find_bars_below(self, image, gray, dark, ink, x_lo, x_hi, base_y, axis_y, line_w,
                          grid_rows: Optional[List[float]] = None) -> List[Bar]:

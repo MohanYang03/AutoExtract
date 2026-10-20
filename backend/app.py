@@ -43,6 +43,7 @@ def create_app() -> Flask:
     # Configure app
     app.secret_key = SECRET_KEY
     app.config['UPLOAD_FOLDER'] = UPLOAD_DIR
+    app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024   # whole papers can be large PDFs
     
     # Ensure upload directory exists
     os.makedirs(UPLOAD_DIR, exist_ok=True)

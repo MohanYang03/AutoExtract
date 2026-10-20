@@ -35,6 +35,25 @@ _extractor: FigureExtractor | None = None
 _lock = threading.Lock()
 
 
+JOB_MAX_AGE_S = 24 * 3600
+
+
+def _clean_old_jobs() -> None:
+    """Figure images are only needed while a result is being reviewed; drop day-old jobs."""
+    if not os.path.isdir(JOBS_DIR):
+        return
+    cutoff = time.time() - JOB_MAX_AGE_S
+    for name in os.listdir(JOBS_DIR):
+        path = os.path.join(JOBS_DIR, name)
+        try:
+            if os.path.isdir(path) and os.path.getmtime(path) < cutoff:
+                for f in os.listdir(path):
+                    os.remove(os.path.join(path, f))
+                os.rmdir(path)
+        except OSError:
+            pass
+
+
 def _get_extractor() -> FigureExtractor:
     global _extractor
     with _lock:
@@ -57,6 +76,8 @@ def handle_extract() -> Tuple[Dict[str, Any], int]:
     job = request.form.get("job") or uuid.uuid4().hex
     if not job.isalnum():
         return {"error": "Invalid job id"}, 400
+    if not request.form.get("job"):
+        _clean_old_jobs()
     job_dir = os.path.join(JOBS_DIR, job)
     os.makedirs(job_dir, exist_ok=True)
 
@@ -105,13 +126,25 @@ def handle_extract() -> Tuple[Dict[str, Any], int]:
 def handle_export():
     data = request.get_json(silent=True) or {}
     results = []
-    for fig in data.get("figures", []):
-        for pd in fig.get("panels", []):
-            if pd.get("excluded"):
-                continue
-            results.append(PanelResult(source=fig.get("source", ""), page=fig.get("page", -1),
-                                       figure=fig.get("figure", ""), panel=Panel.from_dict(pd),
-                                       paper_id=fig.get("paper_id")))
+    try:
+        for fig in data.get("figures", []):
+            for pd in fig.get("panels", []):
+                if pd.get("excluded"):
+                    continue
+                panel = Panel.from_dict(pd)
+                for b in panel.bars:   # values must be numbers (they came from us, but were editable)
+                    for v in (b.mean, b.mean_plus_err):
+                        if v is not None and not isinstance(v, (int, float)):
+                            raise ValueError("bar values must be numbers")
+                    if b.n is not None:
+                        b.n = int(b.n)
+                if panel.error_type not in ("sem", "sd"):
+                    panel.error_type = "sem"
+                results.append(PanelResult(source=str(fig.get("source", "")), page=int(fig.get("page", -1)),
+                                           figure=str(fig.get("figure", "")), panel=panel,
+                                           paper_id=fig.get("paper_id")))
+    except (TypeError, ValueError, AttributeError) as e:
+        return {"error": f"Invalid export data: {e}"}, 400
     if not results:
         return {"error": "Nothing to export"}, 400
     buf = io.BytesIO()

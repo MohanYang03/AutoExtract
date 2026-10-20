@@ -40,7 +40,12 @@ class PanelResult:
 
     @property
     def name(self) -> str:
-        fig = f"Fig{self.figure}" if self.figure else f"p{self.page + 1}"
+        if self.figure:
+            fig = f"Fig{self.figure}"
+        elif self.page >= 0:
+            fig = f"p{self.page + 1}"
+        else:
+            fig = "Image"
         return f"{fig}{self.panel.letter}" if self.panel.letter else fig
 
 

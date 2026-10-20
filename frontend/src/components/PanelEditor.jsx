@@ -26,26 +26,41 @@ const PanelEditor = ({ figure, panel, onChange }) => {
     const isDot = panel.kind === 'dot';
     const errLabel = panel.error_type === 'sd' ? 'SD' : 'SEM';
 
-    const toImageY = useCallback((evt) => {
+    const toImage = useCallback((evt) => {
         const svg = svgRef.current;
         const pt = svg.createSVGPoint();
         pt.x = evt.clientX;
         pt.y = evt.clientY;
-        return pt.matrixTransform(svg.getScreenCTM().inverse()).y;
+        return pt.matrixTransform(svg.getScreenCTM().inverse());
     }, []);
 
-    const clampY = (y) => Math.max(panel.plot_top - 0.05 * plotH, Math.min(panel.axis_y, y));
+    const clampY = (y) => Math.max(panel.plot_top - 0.05 * plotH, Math.min(panel.axis_y + 0.25 * plotH, y));
     const moveLine = (target, y) => onChange({ type: 'bar', index: target.bar, patch: { [target.key]: clampY(y) } });
 
     const onPointerMove = (evt) => {
-        if (drag) moveLine(drag, toImageY(evt));
+        if (drag) moveLine(drag, toImage(evt).y);
     };
 
-    const startDrag = (bar, key) => (evt) => {
+    // Grab the mean or cap line nearest the pointer within the bar under it,
+    // so lines a few pixels thin don't have to be hit exactly.
+    const onPointerDown = (evt) => {
+        const { x, y } = toImage(evt);
+        const tol = 8 * lineW;
+        let best = null;
+        panel.bars.forEach((b, i) => {
+            if (x < b.x1 - tol || x > b.x2 + tol) return;
+            for (const key of ['top_px', 'cap_px']) {
+                if (b[key] == null) continue;
+                const d = Math.abs(b[key] - y);
+                if (d <= tol && (!best || d < best.d)) best = { bar: i, key, d };
+            }
+        });
+        if (!best) return;
         evt.preventDefault();
         svgRef.current?.focus();
-        setDrag({ bar, key });
-        setSelected({ bar, key });
+        svgRef.current?.setPointerCapture?.(evt.pointerId);
+        setDrag({ bar: best.bar, key: best.key });
+        setSelected({ bar: best.bar, key: best.key });
     };
 
     const onKeyDown = (evt) => {
@@ -76,7 +91,7 @@ const PanelEditor = ({ figure, panel, onChange }) => {
 
     return (
         <div className={`card border-0 shadow-sm mb-3 panel-card ${panel.excluded ? 'opacity-50' : ''}`}>
-            <div className="card-header bg-white d-flex align-items-center gap-2 flex-wrap py-2">
+            <div className="panel-head d-flex align-items-center gap-2 flex-wrap">
                 <strong>{panelName(figure, panel)}</strong>
                 <span className="text-muted text-truncate" style={{ maxWidth: 320 }}>{panel.y_title}</span>
                 {isDot && <span className="badge bg-info text-dark">dot plot</span>}
@@ -115,9 +130,11 @@ const PanelEditor = ({ figure, panel, onChange }) => {
                             className="w-100 border rounded panel-svg"
                             tabIndex={0}
                             onKeyDown={onKeyDown}
+                            onPointerDown={onPointerDown}
                             onPointerMove={onPointerMove}
                             onPointerUp={() => setDrag(null)}
-                            onPointerLeave={() => setDrag(null)}
+                            onPointerCancel={() => setDrag(null)}
+                            style={{ cursor: drag ? 'ns-resize' : 'crosshair' }}
                             aria-label={`${panelName(figure, panel)} chart with editable bar positions`}
                         >
                             <image href={figure.image_url} x="0" y="0" width={figure.width} height={figure.height} />
@@ -133,23 +150,17 @@ const PanelEditor = ({ figure, panel, onChange }) => {
                                         {!isDot && (
                                             <rect x={b.x1} y={b.top_px} width={b.x2 - b.x1}
                                                 height={Math.max(0, panel.axis_y - b.top_px)}
-                                                fill="rgba(253,126,20,0.10)" stroke="none" />
+                                                fill="rgba(253,126,20,0.10)" stroke="none" pointerEvents="none" />
                                         )}
                                         <text x={cx} y={panel.axis_y - 4 * lineW} fontSize={8 * lineW}
                                             textAnchor="middle" fill="#fd7e14" fontWeight="700">{i + 1}</text>
                                         <line x1={b.x1} x2={b.x2} y1={b.top_px} y2={b.top_px}
                                             stroke="#fd7e14" strokeWidth={isSel(i, 'top_px') ? 2 * lineW : lineW} />
-                                        <line x1={b.x1} x2={b.x2} y1={b.top_px} y2={b.top_px}
-                                            stroke="transparent" strokeWidth={7 * lineW}
-                                            style={{ cursor: 'ns-resize' }} onPointerDown={startDrag(i, 'top_px')} />
                                         {b.cap_px != null && (
                                             <>
                                                 <line x1={cx - capHalf} x2={cx + capHalf} y1={b.cap_px} y2={b.cap_px}
                                                     stroke={b.uncertain ? '#dc3545' : '#0d6efd'}
                                                     strokeWidth={isSel(i, 'cap_px') ? 2 * lineW : lineW} />
-                                                <line x1={cx - capHalf} x2={cx + capHalf} y1={b.cap_px} y2={b.cap_px}
-                                                    stroke="transparent" strokeWidth={7 * lineW}
-                                                    style={{ cursor: 'ns-resize' }} onPointerDown={startDrag(i, 'cap_px')} />
                                             </>
                                         )}
                                     </g>

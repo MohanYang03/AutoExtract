@@ -13,11 +13,15 @@ export const LONG_COLUMNS = [
 export const valueAt = (panel, px) =>
     panel.slope == null ? null : panel.slope * px + panel.intercept;
 
-/** Recompute a bar's values from its (possibly dragged) pixel positions */
+/**
+ * Recompute a bar's values from its (possibly dragged) pixel positions.
+ * The error is a magnitude, as on the server, so dragging the mean past the
+ * cap can't produce a negative SEM/SD.
+ */
 export const withValues = (panel, bar) => {
     const mean = valueAt(panel, bar.top_px);
-    const top = bar.cap_px == null ? mean : valueAt(panel, bar.cap_px);
-    return { ...bar, mean, mean_plus_err: top };
+    const err = bar.cap_px == null || mean == null ? 0 : Math.abs(valueAt(panel, bar.cap_px) - mean);
+    return { ...bar, mean, mean_plus_err: mean == null ? null : mean + err };
 };
 
 /**
@@ -66,8 +70,10 @@ export const panelToTSV = (panel, paperId) =>
         .join('\n');
 
 export const panelName = (figure, panel) => {
-    const fig = figure.figure ? `Fig ${figure.figure}` : `Page ${figure.page + 1}`;
-    return `${fig}${panel.letter || ''}`;
+    let fig = 'Image';
+    if (figure.figure) fig = `Fig ${figure.figure}`;
+    else if (figure.page >= 0) fig = `Page ${figure.page + 1}`;
+    return `${fig}${panel.letter ? ` ${panel.letter}` : ''}`;
 };
 
 /** Format a number for display: 4 significant digits, no trailing zeros */

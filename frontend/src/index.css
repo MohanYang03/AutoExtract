@@ -3021,6 +3021,16 @@ html {
 .batch-extract .panel-svg:focus-visible {
   box-shadow: 0 0 0 .2rem rgba(13, 110, 253, .35);
 }
+.batch-extract .panel-head {
+  background: #f8f9fb;
+  border-bottom: 1px solid #e3e6ea;
+  padding: .55rem 1rem;
+  border-radius: .375rem .375rem 0 0;
+  color: #212529;
+}
+.batch-extract .panel-card .card-body {
+  padding: 1rem !important;
+}
 .batch-extract .panel-card .table td,
 .batch-extract .panel-card .table th {
   white-space: nowrap;

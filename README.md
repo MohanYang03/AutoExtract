@@ -1,37 +1,80 @@
-# AutoExtract
+# AutoDigitizer
 
 A web app that extracts data from bar charts in scientific papers. Drop in whole PDFs: every bar chart and dot plot is found, its y-axis calibrated from all tick labels, and each group's mean and error bar measured from the pixels. Results go to one Excel workbook laid out like a meta-analysis long-format sheet, ready to paste.
 
-The backend runs on Flask; the frontend is a Vite + React app. The original YOLO-based single-image Bar Analyzer is still included.
+Built on [AutoExtract](https://github.com/MohanYang03/AutoExtract) by Mohan Yang; its YOLO-based single-image Bar Analyzer is still included. The backend runs on Flask; the frontend is a Vite + React app.
 
-## Quick Start
+## Setup (once)
 
-**Pull and run** (default YOLO weights are inside the image)
+You need:
+- **Python 3.10–3.12**: [python.org](https://www.python.org/downloads/). Python 3.13+ won't install the pinned PyTorch. On Windows, tick "Add python.exe to PATH" in the installer.
+- **Node.js 20 or newer**: [nodejs.org](https://nodejs.org/) (the LTS version is fine)
+- **Git**: [git-scm.com](https://git-scm.com/)
 
-```bash
-docker pull yanghenry/autoextract:latest
-docker run --rm -p 9000:9000 yanghenry/autoextract:latest
+Then, in a terminal:
+
+**Windows (PowerShell)**
+```powershell
+git clone https://github.com/gordonzyxu/AutoDigitizer.git
+cd AutoDigitizer
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+cd frontend; npm install; npm run build; cd ..
 ```
 
-Open **http://localhost:9000** and choose **Batch Extract**.
-
-**Use your own weights** (optional, classic Bar Analyzer only): bind-mount over the default file path.
-
+**macOS / Linux**
 ```bash
-docker run --rm -p 9000:9000 \
-  -v /absolute/path/on/host/best.pt:/app/backend/models/best.pt:ro \
-  yanghenry/autoextract:latest
-```
-
-The image bundles the production-built frontend, the Flask API, and **`backend/models/best.pt`** from this repository so a volume is not required.
-
-**Run without Docker**
-
-```bash
-python -m venv .venv && .venv/bin/pip install -r requirements.txt   # Windows: .venv\Scripts\pip
+git clone https://github.com/gordonzyxu/AutoDigitizer.git
+cd AutoDigitizer
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 cd frontend && npm install && npm run build && cd ..
-FRONTEND_DIST=frontend/dist .venv/bin/python backend/app.py
 ```
+
+The Python install downloads about 2 GB the first time (PyTorch, used only by the classic Bar Analyzer).
+
+## Run
+
+From the `AutoDigitizer` folder:
+
+```powershell
+.venv\Scripts\python backend\app.py      # Windows
+.venv/bin/python backend/app.py          # macOS / Linux
+```
+
+Open **http://localhost:9000/extract** in your browser. Keep the terminal open while you use it; press **Ctrl+C** to stop.
+
+## Update to the latest version
+
+```powershell
+git pull
+.venv\Scripts\python -m pip install -r requirements.txt   # macOS/Linux: .venv/bin/python
+cd frontend; npm install; npm run build; cd ..
+```
+
+Then run it as above.
+
+## Troubleshooting
+
+- **Page says "Resource not found" / 404**: the web page isn't built yet. Run `cd frontend; npm install; npm run build; cd ..` and restart.
+- **`python` not found (Windows)**: reinstall Python with "Add python.exe to PATH" ticked, or use `py -3.12 -m venv .venv`.
+- **pip can't find `torch==2.3.0`**: your Python is too new; install Python 3.12 and recreate `.venv`.
+- **pip error mentioning "Long Path support" (Windows)**: the folder path is too long for PyTorch's files. Clone somewhere shorter (e.g. `C:\Code\AutoDigitizer`), delete `.venv`, and run the setup again.
+- **Port 9000 already in use**: start on another port, e.g. PowerShell `$env:PORT=9001; .venv\Scripts\python backend\app.py`, then open http://localhost:9001/extract.
+- **`git clone` asks for access / "repository not found"**: the repository is private; ask the owner to add your GitHub account as a collaborator.
+
+## Docker (optional)
+
+Instead of the Python/Node setup, with Docker installed:
+
+```bash
+git clone https://github.com/gordonzyxu/AutoDigitizer.git
+cd AutoDigitizer
+docker build -t autodigitizer .
+docker run --rm -p 9000:9000 autodigitizer
+```
+
+Open **http://localhost:9000/extract**. The image includes the built page and the Bar Analyzer weights (`backend/models/best.pt`); to use your own weights add `-v /absolute/path/best.pt:/app/backend/models/best.pt:ro` to `docker run`.
 
 ## Batch Extract
 
@@ -85,7 +128,8 @@ The original two-label YOLO pipeline scored 17 % mean error on the same 30 bars.
 ## Tests and benchmarks
 
 ```bash
-pip install -r requirements-dev.txt
+.venv/bin/python -m pip install -r requirements-dev.txt   # Windows: .venv\Scripts\python
+# run the commands below with the same .venv python
 python -m pytest tests -q                 # synthetic accuracy + API tests
 python tests/fuzz.py 200                  # randomised stress test
 python tests/ui_check.py                  # headless browser check (app must be running)

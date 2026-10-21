@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import List, Optional
 
 import cv2
@@ -79,7 +80,7 @@ def long_header(error_type: str) -> List[str]:
 
 
 def box_formulas(a: str, q1: str, m: str, q3: str, b: str, n: str,
-                 whisker_type: str, mean_method: str, sd_method: str):
+                 whisker_type: str, mean_method: str, sd_method: str, quartiles: bool = True):
     """
     Excel formulas (without "=") for the estimated mean and SD, mirroring
     estimators.estimate. Arguments are cell references. When the whiskers
@@ -88,6 +89,17 @@ def box_formulas(a: str, q1: str, m: str, q3: str, b: str, n: str,
     """
     xi = f"(2*NORMSINV(({n}-0.375)/({n}+0.25)))"
     eta = f"(2*NORMSINV((0.75*{n}-0.125)/({n}+0.25)))"
+    hozo_sd = (f"IF({n}<=15,SQRT((({a}-2*{m}+{b})^2/4+({b}-{a})^2)/12),"
+               f"IF({n}<=70,({b}-{a})/4,({b}-{a})/6))")
+    if not quartiles:
+        # S1: min, median, max (a violin showing only its median)
+        if mean_method == "luo":
+            w = f"(4/(4+{n}^0.75))"
+            mean = f"{w}*({a}+{b})/2+(1-{w})*{m}"
+        else:
+            mean = f"({a}+2*{m}+{b})/4"
+        sd = hozo_sd if sd_method == "hozo" else f"({b}-{a})/{xi}"
+        return mean, sd
     if whisker_type == "minmax":
         if mean_method == "wan":
             mean = f"({a}+2*{q1}+2*{m}+2*{q3}+{b})/8"
@@ -100,8 +112,7 @@ def box_formulas(a: str, q1: str, m: str, q3: str, b: str, n: str,
         if sd_method == "wan":
             sd = f"0.5*(({b}-{a})/{xi}+({q3}-{q1})/{eta})"
         elif sd_method == "hozo":
-            sd = (f"IF({n}<=15,SQRT((({a}-2*{m}+{b})^2/4+({b}-{a})^2)/12),"
-                  f"IF({n}<=70,({b}-{a})/4,({b}-{a})/6))")
+            sd = hozo_sd
         else:
             w = f"(1/(1+0.07*{n}^0.6))"
             sd = f"{w}*({b}-{a})/{xi}+(1-{w})*({q3}-{q1})/{eta}"
@@ -131,8 +142,12 @@ def _write_box_rows(ws, start_row: int, result: PanelResult, first_col: int, sta
         five = [bx.lo, bx.q1, bx.median, bx.q3, bx.hi]
         for i, v in enumerate(five + [p.whisker_type, p.mean_method, p.sd_method]):
             ws.cell(r, stat_col + i, v)
-        if None not in five:
-            mean_f, sd_f = box_formulas(*refs, n_ref, p.whisker_type, p.mean_method, p.sd_method)
+        quartiles = bx.q1 is not None and bx.q3 is not None
+        usable = (None not in five) if quartiles else (
+            p.whisker_type == "minmax" and None not in (bx.lo, bx.median, bx.hi))
+        if usable:
+            mean_f, sd_f = box_formulas(*refs, n_ref, p.whisker_type, p.mean_method, p.sd_method,
+                                        quartiles=quartiles)
             ws.cell(r, col["mean"], f'=IF({n_ref}="","",{mean_f})')
             ws.cell(r, col["sd"], f'=IF({n_ref}="","",{sd_f})')
             ws.cell(r, col["sem"], f'=IF({n_ref}="","",{sd_ref}/SQRT({n_ref}))')
@@ -153,12 +168,31 @@ def _box_check(bx) -> str:
     notes = []
     if bx.uncertain:
         notes.append(bx.note or "check box")
+    elif bx.note:
+        notes.append(bx.note)
     if None not in (bx.q1, bx.median, bx.q3) and skewness_warning(bx.q1, bx.median, bx.q3):
         notes.append("skewed: estimate may be biased")
     return "; ".join(notes)
 
 
-def _write_long_rows(ws, start_row: int, result: PanelResult, first_col: int = 1) -> int:
+def line_rows(panel: Panel) -> list:
+    """
+    A line plot's points as long-format rows: the group is the series, and
+    the x value (or x label) of each point goes alongside.
+    """
+    rows = []
+    for k, s in enumerate(panel.series, 1):
+        name = s.label or f"Series {k}"
+        for pt in s.points:
+            x = pt.x if pt.x is not None else pt.x_label
+            if isinstance(x, float):
+                x = round(x, 4)
+            rows.append(SimpleNamespace(mean=pt.mean, mean_plus_err=pt.mean_plus_err, label=name, n=pt.n,
+                                        uncertain=pt.uncertain, x=x))
+    return rows
+
+
+def _write_long_rows(ws, start_row: int, result: PanelResult, first_col: int = 1, items=None) -> int:
     """
     Write one row per bar in LONG_COLUMNS order. Returns the next free row.
 
@@ -169,7 +203,7 @@ def _write_long_rows(ws, start_row: int, result: PanelResult, first_col: int = 1
     r = start_row
     col = {name: first_col + i for i, name in enumerate(LONG_COLUMNS)}
     is_sd = result.panel.error_type == "sd"
-    for bar in result.panel.bars:
+    for bar in (items if items is not None else result.panel.bars):
         mean = bar.mean
         top = bar.mean_plus_err if bar.mean_plus_err is not None else mean
         err = None if mean is None or top is None else top - mean
@@ -210,7 +244,7 @@ def build_workbook(results: List[PanelResult]) -> Workbook:
     # and box estimates, so the last long column is "mean+error" here.
     combined = wb.create_sheet("All data")
     combined.append(["source", "figure", "panel", "y-axis title", "error bars", "check"]
-                    + LONG_COLUMNS[:-1] + ["mean+error"] + BOX_COLUMNS)
+                    + LONG_COLUMNS[:-1] + ["mean+error"] + BOX_COLUMNS + ["x"])
     for c in combined[1]:
         c.font = HEADER_FONT
     combined_stats = 7 + len(LONG_COLUMNS)
@@ -219,14 +253,22 @@ def build_workbook(results: List[PanelResult]) -> Workbook:
     next_combined = 2
     for res in results:
         p = res.panel
-        is_box = p.kind == "box"
+        is_box = p.kind in ("box", "violin")
         title = _sheet_title(f"{res.name} {p.y_title}".strip(), used)
         ws = wb.create_sheet(title)
         check_col = len(LONG_COLUMNS) + 2
+        rows = line_rows(p) if p.kind == "line" else None
         if is_box:
             ws.append(long_header("sd") + ["", "check"] + BOX_COLUMNS)
             _write_box_rows(ws, 2, res, 1, check_col + 1)
             checks = [_box_check(bx) for bx in p.boxes]
+        elif rows is not None:
+            ws.append(long_header(p.error_type) + ["", "check", "series", "x"])
+            _write_long_rows(ws, 2, res, items=rows)
+            for i, row in enumerate(rows):
+                ws.cell(2 + i, check_col + 1, row.label)
+                ws.cell(2 + i, check_col + 2, row.x)
+            checks = ["check point" if row.uncertain else "" for row in rows]
         else:
             ws.append(long_header(p.error_type) + ["", "check"])
             _write_long_rows(ws, 2, res)
@@ -238,7 +280,7 @@ def build_workbook(results: List[PanelResult]) -> Workbook:
                 ws.cell(2 + i, check_col, note)
         ws.column_dimensions["F"].width = 28
 
-        error_label = "box (estimated)" if is_box else p.error_type.upper()
+        error_label = f"{p.kind} (estimated)" if is_box else p.error_type.upper()
         for i, note in enumerate(checks):
             row = next_combined + i
             combined.cell(row, 1, res.source)
@@ -249,6 +291,10 @@ def build_workbook(results: List[PanelResult]) -> Workbook:
             combined.cell(row, 6, note)
         if is_box:
             next_combined = _write_box_rows(combined, next_combined, res, 7, combined_stats)
+        elif rows is not None:
+            for i, row in enumerate(rows):
+                combined.cell(next_combined + i, combined_stats + len(BOX_COLUMNS), row.x)
+            next_combined = _write_long_rows(combined, next_combined, res, first_col=7, items=rows)
         else:
             next_combined = _write_long_rows(combined, next_combined, res, first_col=7)
 
@@ -284,6 +330,17 @@ def draw_overlay(image: np.ndarray, panels: List[Panel]) -> np.ndarray:
                 cv2.drawMarker(out, (cx, int(round(b.mean_px))), (0, 160, 0), cv2.MARKER_CROSS, 12, 2)
             for y in b.outliers_px:
                 cv2.circle(out, (cx, int(round(y))), 4, magenta, 1)
+        for s in p.series:
+            # trace in a colour that stands out from the series' own
+            pts = np.array([[int(x), int(y)] for x, y in s.trace], np.int32)
+            if len(pts) > 1:
+                cv2.polylines(out, [pts], False, magenta, 2)
+            for pt in s.points:
+                c = (int(round(pt.x_px)), int(round(pt.y_px)))
+                cv2.circle(out, c, 5, orange, 2)
+                for cap in (pt.cap_hi_px, pt.cap_lo_px):
+                    if cap is not None:
+                        cv2.line(out, (c[0] - 7, int(round(cap))), (c[0] + 7, int(round(cap))), blue, 2)
         for i, b in enumerate(p.bars, 1):
             if p.kind == "dot":
                 cv2.line(out, (b.x1, int(round(b.top_px))), (b.x2, int(round(b.top_px))), orange, 3)

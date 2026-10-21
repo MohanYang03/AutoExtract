@@ -23,7 +23,7 @@ from exporter import box_formulas  # noqa: E402
 from figure_extractor import ExtractOptions, FigureExtractor  # noqa: E402
 from synth import BoxSpec, ChartSpec, render, render_box  # noqa: E402
 
-FAST = ExtractOptions(bar_names=False, titles=False)
+FAST = ExtractOptions(bar_names=False, titles=False, chart_type="box")
 STATS4 = [(2, 5, 7, 9, 13), (4, 8, 11, 15, 19), (1, 3, 4, 6, 8), (6, 9, 12, 13, 17)]
 
 
@@ -82,12 +82,25 @@ def test_box_values(extractor, name):
             assert len(b.outliers) == len(outs), (b.outliers, outs)
 
 
-def test_bars_are_not_boxes(extractor):
-    """Floating rectangles need a median to count as boxes; bars stand on the axis."""
+def test_box_page_ignores_bar_charts(extractor):
+    """Papers mix chart types: bar charts and dot plots give no box panels."""
     for spec in (ChartSpec([12.0, 31.5, 22.0], [1.5, 3.0, 2.2]),
+                 ChartSpec([80, 40, 75, 55], [4, 3, 5, 4], dots=True, seed=3),
                  ChartSpec([110, 170, 126], [44, 52, 35], kind="dot", dots=True, ylim=(0, 300))):
-        panels = extractor.extract(render(spec), FAST)
-        assert panels and all(p.kind != "box" for p in panels)
+        assert extractor.extract(render(spec), FAST) == []
+
+
+def test_bar_page_ignores_box_plots(extractor):
+    bar_opts = ExtractOptions(bar_names=False, titles=False, chart_type="bar")
+    panels = extractor.extract(render_box(CASES["white"]), bar_opts)
+    assert all(p.kind != "box" for p in panels)
+
+
+def test_chart_type_option():
+    assert ExtractOptions.from_dict({"chart_type": "box", "titles": 0}).chart_type == "box"
+    assert ExtractOptions.from_dict({}).chart_type == "bar"
+    with pytest.raises(ValueError):
+        ExtractOptions.from_dict({"chart_type": "pie"})
 
 
 # ---- estimators -------------------------------------------------------------- #

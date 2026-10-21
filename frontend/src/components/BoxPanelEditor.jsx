@@ -11,7 +11,7 @@
 
 import React, { useCallback, useRef, useState } from 'react';
 import {
-    MEAN_METHODS, SD_METHODS, WHISKER_TYPES, estimateBox, fmt, isSkewed, panelName, panelToTSV,
+    MEAN_METHODS, SD_METHODS, VIOLIN_ENDS, WHISKER_TYPES, estimateBox, fmt, isSkewed, panelName, panelToTSV,
 } from '../utils/panelMath';
 
 const LINES = ['hi_px', 'q3_px', 'median_px', 'q1_px', 'lo_px'];
@@ -30,6 +30,9 @@ const BoxPanelEditor = ({ figure, panel, onChange }) => {
     const y1 = Math.min(figure.height, panel.axis_y + 0.22 * plotH);
     const lineW = Math.max(1.5, (x1 - x0) / 300);
     const usesRange = panel.whisker_type === 'minmax';
+    const isViolin = panel.kind === 'violin';
+    const noun = isViolin ? 'violin' : 'box';
+    const medianOnly = panel.boxes.some((b) => b.q1 == null || b.q3 == null);
 
     const toImage = useCallback((evt) => {
         const svg = svgRef.current;
@@ -53,6 +56,7 @@ const BoxPanelEditor = ({ figure, panel, onChange }) => {
         panel.boxes.forEach((b, i) => {
             if (x < b.x1 - tol || x > b.x2 + tol) return;
             for (const key of LINES) {
+                if ((key === 'q1_px' || key === 'q3_px') && (b.q1 == null || b.q3 == null)) continue;
                 const d = Math.abs(b[key] - y);
                 if (d <= tol && (!best || d < best.d)) best = { box: i, key, d };
             }
@@ -110,7 +114,7 @@ const BoxPanelEditor = ({ figure, panel, onChange }) => {
             <div className="panel-head d-flex align-items-center gap-2 flex-wrap">
                 <strong>{panelName(figure, panel)}</strong>
                 <span className="text-muted text-truncate" style={{ maxWidth: 320 }}>{panel.y_title}</span>
-                <span className="badge bg-info text-dark">box plot</span>
+                <span className="badge bg-info text-dark">{noun} plot</span>
                 {panel.scale === 'log' && <span className="badge bg-secondary">log axis</span>}
                 {flagged > 0 && (
                     <span className="badge bg-warning text-dark">{flagged} box{flagged > 1 ? 'es' : ''} to check</span>
@@ -139,7 +143,7 @@ const BoxPanelEditor = ({ figure, panel, onChange }) => {
                             onPointerUp={() => setDrag(null)}
                             onPointerCancel={() => setDrag(null)}
                             style={{ cursor: drag ? 'ns-resize' : 'crosshair' }}
-                            aria-label={`${panelName(figure, panel)} box plot with editable quartiles`}
+                            aria-label={`${panelName(figure, panel)} ${noun} plot with editable quartiles`}
                         >
                             <image href={figure.image_url} x="0" y="0" width={figure.width} height={figure.height} />
                             {panel.ticks.map(([ty, val], i) => (
@@ -163,7 +167,7 @@ const BoxPanelEditor = ({ figure, panel, onChange }) => {
                                             <line key={k} x1={cx - capHalf} x2={cx + capHalf} y1={b[k]} y2={b[k]}
                                                 stroke={edge} strokeWidth={width(i, k)} />
                                         ))}
-                                        {['q3_px', 'q1_px'].map((k) => (
+                                        {b.q1 != null && b.q3 != null && ['q3_px', 'q1_px'].map((k) => (
                                             <line key={k} x1={b.x1} x2={b.x2} y1={b[k]} y2={b[k]} stroke={edge} strokeWidth={width(i, k)} />
                                         ))}
                                         <line x1={b.x1} x2={b.x2} y1={b.median_px} y2={b.median_px}
@@ -185,7 +189,8 @@ const BoxPanelEditor = ({ figure, panel, onChange }) => {
                     </div>
                     <div className="col-xl-7 col-lg-6">
                         <div className="d-flex flex-wrap gap-3 mb-2">
-                            {choice(`wh-${figure.id}-${panel.axis_x}`, 'Whiskers', panel.whisker_type || 'minmax', WHISKER_TYPES, 'whisker_type')}
+                            {choice(`wh-${figure.id}-${panel.axis_x}`, isViolin ? 'Violin ends' : 'Whiskers',
+                                panel.whisker_type || 'minmax', isViolin ? VIOLIN_ENDS : WHISKER_TYPES, 'whisker_type')}
                             {choice(`mm-${figure.id}-${panel.axis_x}`, 'Mean', panel.mean_method || 'luo', MEAN_METHODS, 'mean_method')}
                             {choice(`sm-${figure.id}-${panel.axis_x}`, 'SD', panel.sd_method || 'shi', SD_METHODS, 'sd_method')}
                         </div>
@@ -249,7 +254,9 @@ const BoxPanelEditor = ({ figure, panel, onChange }) => {
                             <button className="btn btn-sm btn-outline-secondary" onClick={applyN} disabled={!nAll}>Apply</button>
                         </div>
                         <div className="small text-muted mt-2">
-                            * Estimated from {usesRange ? 'min, Q1, median, Q3, max' : 'Q1, median, Q3 (whiskers are not the range)'} and n.
+                            * Estimated from {medianOnly ? 'min, median, max (only the median is drawn)'
+                                : usesRange ? 'min, Q1, median, Q3, max'
+                                    : `Q1, median, Q3 (${isViolin ? 'the ends' : 'whiskers'} are not the range)`} and n.
                             {skewed > 0 && ` ${skewed} skewed box${skewed > 1 ? 'es' : ''}: estimates may be biased.`}
                         </div>
                         {panel.warnings?.length > 0 && (

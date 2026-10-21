@@ -51,6 +51,7 @@ class Box:
     n: Optional[int] = None
     uncertain: bool = False          # median or a whisker could not be confirmed
     note: str = ""
+    quartiles: bool = True           # False when only the median is drawn (some violins)
 
 
 def _runs(mask_1d: np.ndarray) -> List[Tuple[int, int]]:
@@ -119,13 +120,6 @@ def find_boxes(image: np.ndarray, gray: np.ndarray, dark: np.ndarray, ink: np.nd
     if len(single) < 0.7 * len(floating):
         return []
     floating = single
-    # Bars standing on a zero line above the x-axis also "float", sharing
-    # one bottom edge; scatter dots inside them can pass for mean markers,
-    # so such shapes must show real median lines to count as boxes.
-    shared_base = (len(floating) >= 2
-                   and max(c[3] for c in floating) - min(c[3] for c in floating) <= 2
-                   and max(c[2] for c in floating) - min(c[2] for c in floating) > 2 * line_w + 3)
-
     boxes = []
     for bx1, bx2, by1, by2 in sorted(floating):
         box = _measure_box(image, gray, dark, ink, fg, bx1, bx2, by1, by2, x_lo, y_lo, line_w, axis_local)
@@ -145,6 +139,21 @@ def find_boxes(image: np.ndarray, gray: np.ndarray, dark: np.ndarray, ink: np.nd
         return []
     if sum(has_whisker) < 0.5 * len(boxes) and len(boxes) < 3:
         return []
+    # Bars standing on a zero line above the x-axis also "float", sharing
+    # one bottom edge; bars hanging below it share their top edge, and a
+    # chart can have both. Scatter dots inside them pass for mean markers,
+    # so such shapes must show real median lines to count as boxes.
+    def shared_row():
+        if len(boxes) < 2:
+            return False
+        tol = line_w + 2                 # bars on either side of a thick zero line
+        for r in {b.q3_px for b in boxes} | {b.q1_px for b in boxes}:
+            if all(abs(b.q3_px - r) <= tol or abs(b.q1_px - r) <= tol for b in boxes):
+                far = [b.q1_px if abs(b.q3_px - r) <= tol else b.q3_px for b in boxes]
+                if max(far) - min(far) > 2 * line_w + 3:
+                    return True
+        return False
+    shared_base = shared_row()
     # most boxes show a median line (or a mean marker) inside
     inner_mark = sum((not b.uncertain) or (b.mean_px is not None and not shared_base) for b in boxes)
     if inner_mark < 0.5 * len(boxes):

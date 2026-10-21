@@ -16,8 +16,30 @@ export const valueAt = (panel, px) => {
     return panel.scale === 'log' ? 10 ** v : v;
 };
 
-/** The measured groups of a panel: boxes for a box plot, else bars. */
-export const panelItems = (panel) => (panel.kind === 'box' ? panel.boxes : panel.bars) || [];
+/** The measured groups of a panel: boxes/violins, line points, or bars. */
+export const panelItems = (panel) => {
+    if (panel.kind === 'box' || panel.kind === 'violin') return panel.boxes || [];
+    if (panel.kind === 'line') return (panel.series || []).flatMap((s) => s.points);
+    return panel.bars || [];
+};
+
+export const xValueAt = (panel, px) =>
+    (panel.x_slope == null || px == null ? null : panel.x_slope * px + panel.x_intercept);
+
+export const seriesName = (series, k) => series.label || `Series ${k + 1}`;
+
+/** Recompute a line point's values from its (possibly dragged) pixel positions. */
+export const pointWithValues = (panel, pt) => {
+    const mean = valueAt(panel, pt.y_px);
+    let top = null;
+    if (pt.cap_hi_px != null) top = valueAt(panel, pt.cap_hi_px);
+    else if (pt.cap_lo_px != null && mean != null) top = 2 * mean - valueAt(panel, pt.cap_lo_px);
+    return { ...pt, mean, mean_plus_err: top };
+};
+
+/** Long-format row for a line point: the group is the series. */
+export const lineRow = (pt, series, k, paperId, errorType) =>
+    barRow({ ...pt, label: seriesName(series, k) }, paperId, errorType);
 
 /**
  * Recompute a bar's values from its (possibly dragged) pixel positions.
@@ -72,6 +94,10 @@ export const WHISKER_TYPES = [
     { key: 'tukey', label: '1.5×IQR', hint: 'Tukey whiskers (outliers drawn as points): only the quartiles are used' },
     { key: 'percentile', label: 'Percentile', hint: 'e.g. 5th–95th or 10th–90th: only the quartiles are used' },
     { key: 'unknown', label: 'Not stated', hint: 'Only the quartiles are used (safest)' },
+];
+export const VIOLIN_ENDS = [
+    { key: 'minmax', label: 'Data min–max', hint: 'Trimmed violins end at the smallest and largest value (Prism and ggplot default)' },
+    { key: 'unknown', label: 'Not the range', hint: 'The tails extend past the data: only the quartiles are used' },
 ];
 export const MEAN_METHODS = [
     { key: 'luo', label: 'Luo 2018', hint: 'Recommended' },
@@ -130,10 +156,22 @@ const eta = (n) => 2 * normInv((0.75 * n - 0.125) / (n + 0.25));
 export const estimateBox = (box, panel) => {
     const { lo: a, q1, median: m, q3, hi: b } = box;
     const n = Number(box.n) || 0;
-    if (q1 == null || m == null || q3 == null || n < 2) return { mean: null, sd: null };
     const meanM = panel.mean_method || 'luo';
     const sdM = panel.sd_method || 'shi';
     const range = (panel.whisker_type || 'minmax') === 'minmax' && a != null && b != null;
+    if (m == null || n < 2) return { mean: null, sd: null };
+    if (q1 == null || q3 == null) {
+        // S1: min, median, max (a violin showing only its median)
+        if (!range) return { mean: null, sd: null };
+        const w = 4 / (4 + n ** 0.75);
+        const mean = meanM === 'luo' ? (w * (a + b)) / 2 + (1 - w) * m : (a + 2 * m + b) / 4;
+        let sd = (b - a) / xi(n);
+        if (sdM === 'hozo') {
+            if (n <= 15) sd = Math.sqrt(((a - 2 * m + b) ** 2 / 4 + (b - a) ** 2) / 12);
+            else sd = n <= 70 ? (b - a) / 4 : (b - a) / 6;
+        }
+        return { mean, sd };
+    }
     let mean;
     let sd;
     if (range) {
@@ -172,9 +210,10 @@ export const isSkewed = (box) => {
 /** Recompute a box's values from its (possibly dragged) pixel positions. */
 export const boxWithValues = (panel, box) => ({
     ...box,
-    q1: valueAt(panel, box.q1_px),
+    // violins drawing only a median have no quartiles to recompute
+    q1: box.quartiles === false ? null : valueAt(panel, box.q1_px),
     median: valueAt(panel, box.median_px),
-    q3: valueAt(panel, box.q3_px),
+    q3: box.quartiles === false ? null : valueAt(panel, box.q3_px),
     lo: valueAt(panel, box.lo_px),
     hi: valueAt(panel, box.hi_px),
 });
@@ -202,13 +241,17 @@ export const boxRow = (box, panel, paperId) => {
 const tsvCell = (v) => (v == null ? '' : String(v));
 
 /** Tab-separated rows that paste straight into a spreadsheet (no header) */
-export const panelToTSV = (panel, paperId) =>
-    panelItems(panel)
-        .map((item) => {
-            const row = panel.kind === 'box' ? boxRow(item, panel, paperId) : barRow(item, paperId, panel.error_type);
-            return LONG_COLUMNS.map((c) => tsvCell(row[c])).join('\t');
-        })
-        .join('\n');
+export const panelToTSV = (panel, paperId) => {
+    let rows;
+    if (panel.kind === 'line') {
+        rows = (panel.series || []).flatMap((s, k) => s.points.map((pt) => lineRow(pt, s, k, paperId, panel.error_type)));
+    } else if (panel.kind === 'box' || panel.kind === 'violin') {
+        rows = panel.boxes.map((b) => boxRow(b, panel, paperId));
+    } else {
+        rows = panel.bars.map((b) => barRow(b, paperId, panel.error_type));
+    }
+    return rows.map((row) => LONG_COLUMNS.map((c) => tsvCell(row[c])).join('\t')).join('\n');
+};
 
 export const panelName = (figure, panel) => {
     let fig = 'Image';

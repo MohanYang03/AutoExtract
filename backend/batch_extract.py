@@ -3,9 +3,12 @@ Batch extraction: papers in, one spreadsheet out.
 
     python backend/batch_extract.py PATH [PATH ...] --out results.xlsx [--review review_dir]
                                     [--no-names] [--no-titles] [--legend] [--error-type sem|sd]
+                                    [--type bar|box|violin|line]
 
 PATH can be a PDF, an image, or a folder (searched recursively for both).
 Every bar-chart (or dot-plot) panel found becomes a sheet in long format;
+with --type box or violin, those are extracted instead (five-number summary
+plus estimated mean/SD formulas), and with --type line each series' points;
 with --review, an annotated PNG of each figure is written so results can be
 eyeballed. Error bars default to what each figure caption says (SEM/SD).
 """
@@ -96,12 +99,17 @@ def run(paths: Iterable[str], out_path: str, review_dir: Optional[str] = None,
         print(f"[{fi}/{len(files)}] {os.path.basename(path)}: {found} panels ({time.time() - t0:.1f}s)")
 
     if not results:
-        print("No bar charts or box plots found.")
+        print(f"No {CHART_NAMES[options.chart_type]} found.")
         return results
     build_workbook(results).save(out_path)
-    print(f"\nWrote {len(results)} panels, {sum(len(r.panel.bars) for r in results)} bars "
+    groups = sum(len(r.panel.items) for r in results)
+    print(f"\nWrote {len(results)} panels, {groups} groups ({CHART_NAMES[options.chart_type]}) "
           f"in {time.time() - t_all:.0f}s -> {out_path}")
     return results
+
+
+CHART_NAMES = {"bar": "bar charts or dot plots", "box": "box plots", "violin": "violin plots",
+               "line": "line plots"}
 
 
 def main() -> None:
@@ -112,10 +120,13 @@ def main() -> None:
     ap.add_argument("--no-names", action="store_true", help="skip reading bar names")
     ap.add_argument("--no-titles", action="store_true", help="skip panel letters and axis titles")
     ap.add_argument("--legend", action="store_true", help="name bars from colour legends (slower)")
+    ap.add_argument("--type", choices=list(CHART_NAMES), default="bar", help="chart type to extract")
+    ap.add_argument("--box", action="store_true", help="same as --type box")
     ap.add_argument("--error-type", choices=["sem", "sd"], default=None,
                     help="override what the error bars show (default: read from each caption, else SEM)")
     args = ap.parse_args()
-    opts = ExtractOptions(bar_names=not args.no_names, titles=not args.no_titles, legend_colors=args.legend)
+    opts = ExtractOptions(bar_names=not args.no_names, titles=not args.no_titles, legend_colors=args.legend,
+                          chart_type="box" if args.box else args.type)
     run(args.paths, args.out, args.review, opts, args.error_type)
 
 

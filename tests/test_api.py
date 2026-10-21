@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "backend"))
 sys.path.insert(0, HERE)
 
 import extract_routes  # noqa: E402
-from synth import BoxSpec, ChartSpec, render, render_box  # noqa: E402
+from synth import BoxSpec, ChartSpec, LineSpec, ViolinSpec, render, render_box, render_line, render_violin  # noqa: E402
 
 SPEC = ChartSpec([12.0, 31.5, 22.0], [1.5, 3.0, 2.2], labels=["Control", "CUMS", "CUMS+EA"])
 
@@ -139,7 +139,9 @@ def test_box_plot_extract_and_export(client):
     """A box plot comes back as kind "box"; the export estimates mean/SD with live formulas."""
     stats = [(2, 5, 7, 9, 13), (4, 8, 11, 15, 19)]
     ok, buf = cv2.imencode(".png", render_box(BoxSpec(stats, ylim=(0, 20))))
-    data = _post(client, buf.tobytes(), "box.png").get_json()
+    # the bar page finds nothing in a box plot; the box page reads it
+    assert _post(client, buf.tobytes(), "box.png").get_json()["figures"] == []
+    data = _post(client, buf.tobytes(), "box.png", options=json.dumps({"chart_type": "box"})).get_json()
     panel = data["figures"][0]["panels"][0]
     assert panel["kind"] == "box" and len(panel["boxes"]) == 2
     assert abs(panel["boxes"][0]["median"] - 7) < 0.2
@@ -158,7 +160,48 @@ def test_box_plot_extract_and_export(client):
     assert abs(row[16] - 7) < 0.2 and row[19] == "tukey" and row[20] == "luo"
     assert [c.value for c in wb["Summary"][2]][4] == "box"
     combined = [c.value for c in wb["All data"][1]]
-    assert combined[-8:-3] == ["min", "Q1", "median", "Q3", "max"]
+    assert combined[-9:-4] == ["min", "Q1", "median", "Q3", "max"] and combined[-1] == "x"
+
+
+def test_violin_extract_and_export(client):
+    import numpy as np
+    rng = np.random.default_rng(1)
+    spec = ViolinSpec([rng.normal(10, 2, 14), rng.normal(14, 3, 14)], inner="lines")
+    ok, buf = cv2.imencode(".png", render_violin(spec))
+    data = _post(client, buf.tobytes(), "violin.png", options=json.dumps({"chart_type": "violin"})).get_json()
+    panel = data["figures"][0]["panels"][0]
+    assert panel["kind"] == "violin" and len(panel["boxes"]) == 2
+    assert abs(panel["boxes"][0]["median"] - spec.stats[0][2]) < 0.3
+    panel["boxes"][0]["n"] = 14
+    r = client.post("/api/export", json={"figures": data["figures"]})
+    wb = openpyxl.load_workbook(io.BytesIO(r.data))
+    ws = wb[wb.sheetnames[2]]
+    assert "Q1" in [c.value for c in ws[1]] and str(ws.cell(2, 1).value).startswith("=IF(")
+    assert [c.value for c in wb["Summary"][2]][4] == "violin"
+
+
+def test_line_extract_and_export(client):
+    spec = LineSpec([0, 7, 14, 21], [[20, 22, 25, 27], [16, 17, 18, 19]], errs=[[1] * 4, [0.8] * 4])
+    ok, buf = cv2.imencode(".png", render_line(spec))
+    data = _post(client, buf.tobytes(), "line.png", options=json.dumps({"chart_type": "line"})).get_json()
+    panel = data["figures"][0]["panels"][0]
+    assert panel["kind"] == "line" and len(panel["series"]) == 2
+    assert all(len(s["points"]) == 4 for s in panel["series"])
+    panel["series"][0]["label"] = "Vehicle"
+    panel["series"][0]["points"][0]["n"] = 10
+    r = client.post("/api/export", json={"figures": data["figures"]})
+    assert r.status_code == 200
+    wb = openpyxl.load_workbook(io.BytesIO(r.data))
+    ws = wb[wb.sheetnames[2]]
+    header = [c.value for c in ws[1]]
+    assert header[-2:] == ["series", "x"]
+    rows = [[c.value for c in row] for row in ws.iter_rows(min_row=2)]
+    assert len(rows) == 8 and rows[0][5] == "Vehicle" and rows[0][6] == 10
+    xs = sorted({round(row[-1]) for row in rows})
+    assert xs == [0, 7, 14, 21]
+    # malformed series are rejected
+    bad = {"figures": [{"panels": [{"kind": "line", "series": [{"points": [{"x_px": 1, "y_px": 1, "mean": "x"}]}]}]}]}
+    assert client.post("/api/export", json=bad).status_code == 400
 
 
 def test_export_excluded_and_empty(client):

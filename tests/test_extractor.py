@@ -100,7 +100,7 @@ def test_grayscale_and_alpha_inputs(extractor):
 
 @pytest.mark.parametrize("text,value", [
     ("100", 100), ("0.5", 0.5), ("-10", -10), ("−5", -5), ("2.5.", 2.5), ("50°", 50),
-    ("1,000", 1000), ("。", 0), ("O", 0), ("Control", None), ("1 000", None), ("***", None),
+    ("1,000", 1000), ("。", 0), ("O", 0), ("Control", None), ("1 000", 1000.0), ("1 00", None), ("***", None),
 ])
 def test_parse_number(text, value):
     assert parse_number(text) == value

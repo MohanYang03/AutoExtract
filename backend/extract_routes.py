@@ -1,7 +1,7 @@
 """
 Batch extraction API.
 
-POST /api/extract   multipart `file` (PDF or image) -> every bar-chart / box-plot panel found
+POST /api/extract   multipart `file` (PDF or image) -> every panel of the requested chart type
 POST /api/export    JSON {figures: [...]} (possibly edited)  -> .xlsx download
 
 Unlike the single-image bar analyzer, these endpoints keep no per-user state on
@@ -144,6 +144,11 @@ def handle_export():
                     _check_numbers(b.mean, b.mean_plus_err)
                 for b in panel.boxes:
                     _check_numbers(b.lo, b.q1, b.median, b.q3, b.hi)
+                for s in panel.series:
+                    if not isinstance(s.label, str):
+                        raise ValueError("series labels must be text")
+                    for pt in s.points:
+                        _check_numbers(pt.mean, pt.mean_plus_err, pt.x)
                 for b in panel.items:
                     if b.n is not None:
                         b.n = int(b.n)

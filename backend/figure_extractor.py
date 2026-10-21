@@ -28,6 +28,8 @@ import cv2
 import numpy as np
 
 from box_plots import Box, find_boxes
+from line_plots import LinePoint, Series, find_series
+from violin_plots import find_violins
 
 
 DARK_THRESHOLD = 128      # gray < this counts as "ink" (lines, text, outlines)
@@ -90,9 +92,15 @@ class Panel:
     label_left: Optional[int] = None   # left edge of the tick labels (px)
     bars: List[Bar] = field(default_factory=list)
     boxes: List[Box] = field(default_factory=list)
+    series: List[Series] = field(default_factory=list)     # line plots
+    # x axis (line plots): tick positions with their labels, and the linear
+    # calibration when the labels are numbers
+    x_ticks: List[Tuple[float, Optional[float], str]] = field(default_factory=list)
+    x_slope: Optional[float] = None
+    x_intercept: Optional[float] = None
     y_title: str = ""
     letter: str = ""          # panel letter ("A", "B", ...) if one was found
-    kind: str = "bar"         # "bar", "dot" (mean line ± whiskers) or "box"
+    kind: str = "bar"         # "bar", "dot" (mean line ± whiskers), "box", "violin" or "line"
     scale: str = "linear"     # y-axis scale: "linear" or "log" (log10)
     error_type: str = "sem"   # what the error bars show: "sem" or "sd" (from the caption, editable)
     # box plots: what the whiskers show and how mean/SD are estimated
@@ -107,10 +115,19 @@ class Panel:
         v = self.slope * py + self.intercept
         return float(10 ** v) if self.scale == "log" else v
 
+    def x_value_at(self, px: Optional[float]) -> Optional[float]:
+        if self.x_slope is None or px is None:
+            return None
+        return self.x_slope * px + self.x_intercept
+
     @property
     def items(self) -> list:
-        """The measured groups: bars/dot groups, or boxes."""
-        return self.boxes if self.kind == "box" else self.bars
+        """The measured groups: bars/dot groups, boxes/violins, or line points."""
+        if self.kind in ("box", "violin"):
+            return self.boxes
+        if self.kind == "line":
+            return [pt for s in self.series for pt in s.points]
+        return self.bars
 
     def to_dict(self) -> dict:
         """JSON-ready dict (numpy scalars from OpenCV converted to plain Python)."""
@@ -124,9 +141,17 @@ class Panel:
         names = {f for f in cls.__dataclass_fields__}
         bar_names = {f for f in Bar.__dataclass_fields__}
         box_names = {f for f in Box.__dataclass_fields__}
-        p = cls(**{k: v for k, v in d.items() if k in names and k not in ("bars", "boxes")})
+        p = cls(**{k: v for k, v in d.items() if k in names and k not in ("bars", "boxes", "series")})
         p.bars = [Bar(**{k: v for k, v in b.items() if k in bar_names}) for b in d.get("bars", [])]
         p.boxes = [Box(**{k: v for k, v in b.items() if k in box_names}) for b in d.get("boxes", [])]
+        pt_names = {f for f in LinePoint.__dataclass_fields__}
+        p.series = []
+        for sd in d.get("series", []):
+            s = Series(color=tuple(sd.get("color", (0, 0, 0))), label=sd.get("label", ""),
+                       markers=bool(sd.get("markers", False)),
+                       trace=[tuple(t) for t in sd.get("trace", [])])
+            s.points = [LinePoint(**{k: v for k, v in pt.items() if k in pt_names}) for pt in sd.get("points", [])]
+            p.series.append(s)
         return p
 
 
@@ -174,6 +199,9 @@ def parse_number(text: str) -> Optional[float]:
         return 0.0
     if re.search(r"[A-Za-z]{2,}", t) or not re.search(r"\d", t):   # words, not a tick label
         return None
+    # thousands grouped with spaces or commas: "350 000", "1,500"
+    if re.fullmatch(r"-?\d{1,3}([ ,]\d{3})+", t):
+        return float(re.sub(r"[ ,]", "", t))
     if re.search(r"\d\s+\d", t) or len(re.sub(r"\D", "", t)) > 7:      # digit soup, not a label
         return None
     t = t.translate(_NUM_FIX).replace(" ", "")
@@ -356,6 +384,9 @@ def plot_foreground(gray, region_ink, y_lo, y_hi, x_lo, x_hi, line_w, grid_rows=
 # Extractor
 # --------------------------------------------------------------------------- #
 
+CHART_TYPES = ("bar", "box", "violin", "line")
+
+
 @dataclass
 class ExtractOptions:
     """
@@ -365,11 +396,19 @@ class ExtractOptions:
     bar_names: bool = True        # category labels under each bar (recognition only, cheap)
     titles: bool = True           # panel letter + y-axis title, used to name sheets (cheap)
     legend_colors: bool = False   # name bars from a colour legend (needs full-figure OCR, slow)
+    # what to look for: "bar" (bar charts and dot plots) or "box" (box plots)
+    chart_type: str = "bar"
 
     @classmethod
     def from_dict(cls, d: Optional[dict]) -> "ExtractOptions":
         d = d or {}
-        return cls(**{k: bool(v) for k, v in d.items() if k in cls.__dataclass_fields__})
+        out = cls(**{k: bool(v) for k, v in d.items()
+                     if k in cls.__dataclass_fields__ and k != "chart_type"})
+        if "chart_type" in d:
+            if d["chart_type"] not in CHART_TYPES:
+                raise ValueError(f"chart_type must be one of {CHART_TYPES}")
+            out.chart_type = d["chart_type"]
+        return out
 
 
 class FigureExtractor:
@@ -387,6 +426,8 @@ class FigureExtractor:
         elif image.shape[2] == 4:
             image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # each panel's foreground is needed by several detectors: keep it
+        self._fg_gray, self._fg_cache = gray, {}
         dark = (gray < DARK_THRESHOLD).astype(np.uint8)
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         ink = ((gray < WHITE_THRESHOLD) | (hsv[:, :, 1] > 40)).astype(np.uint8)
@@ -583,7 +624,31 @@ class FigureExtractor:
         x_lo = axis_left + axis_w
         tick_rows = [t[0] for t in panel.ticks]
 
-        # Box plots first: boxes float above the axis, bars stand on it.
+        if opts.chart_type == "line":
+            return self._build_line_panel(image, gray, dark, ink, panel, opts, line_w, x_lo, right, top,
+                                          axis_left, axis_y, tick_rows, H, W)
+
+        # Violins first on the violin page; elsewhere they are left alone.
+        violins = self._find_violin_plot(image, gray, dark, ink, x_lo, right, top, axis_y, line_w, tick_rows)
+        if violins:
+            # scatter dots piled over a bar can pass for a violin: real violins
+            # float, with no bar standing under them
+            bars = [b for b in self._find_bars(image, gray, dark, ink, x_lo, right, top, axis_y, line_w, tick_rows)
+                    if b.x2 - b.x1 < 0.5 * (right - x_lo)]
+            if len(bars) >= 2 and all(any(b.x1 - 3 <= (v.x1 + v.x2) / 2 <= b.x2 + 3 for b in bars) for v in violins):
+                violins = []
+        if opts.chart_type == "violin":
+            if not violins:
+                return None
+            panel.kind, panel.boxes = "violin", violins
+            return self._finish_box_panel(image, gray, panel, opts, line_w, axis_left, axis_y, H, W)
+        if violins:
+            return None                  # a violin plot: the Violin Analyzer's job
+
+        # Each page looks for one kind of chart: box plots, or bar charts and
+        # dot plots. Papers mix both, so both pages run the box search: the
+        # box page to measure box plots, the bar page to leave them out (read
+        # as bars they would give wrong numbers).
         boxes = self._find_box_plot(image, gray, dark, ink, x_lo, right, top, axis_y, line_w, tick_rows)
         # Small "boxes" in a bar chart are significance labels ("n.s." over a
         # bracket) or filled-in scatter dots over the bars. Real box plots
@@ -599,21 +664,13 @@ class FigureExtractor:
                                    for bx in boxes)
             if on_bars or (len(boxes) <= 2 and len(bars) > len(boxes)):
                 boxes = []
+        if boxes and opts.chart_type != "box":
+            return None                  # a box plot: the Box Analyzer's job
         if boxes:
             panel.kind, panel.boxes = "box", boxes
-            for b in boxes:
-                b.q1, b.median, b.q3 = (panel.value_at(b.q1_px), panel.value_at(b.median_px),
-                                        panel.value_at(b.q3_px))
-                b.lo, b.hi = panel.value_at(b.lo_px), panel.value_at(b.hi_px)
-                b.outliers = [panel.value_at(y) for y in b.outliers_px]
-                b.mean_marker = panel.value_at(b.mean_px)
-            if opts.bar_names:
-                self._read_bar_names(image, gray, panel, line_w)
-            if opts.titles:
-                panel.y_title = self._read_y_title(image, panel)
-            panel.y2 = int(min(H - 1, axis_y + 0.12 * H))
-            panel.x1 = int(max(0, axis_left - 0.12 * W))
-            return panel
+            return self._finish_box_panel(image, gray, panel, opts, line_w, axis_left, axis_y, H, W)
+        if opts.chart_type == "box":
+            return None
 
         # Bars stand on zero. When the axis runs below zero, zero is a row
         # inside the plot: bars above it point up, bars below it point down.
@@ -652,7 +709,21 @@ class FigureExtractor:
             # Real one-bar charts are vanishingly rare; a lone "bar" is far more
             # often a box plot's box or a filled shape, so don't report it.
             return None
-        if panel.kind == "bar" and self._stacked(image, panel.bars, axis_y, line_w):
+        # The markers of a line plot look like dot-plot groups; in a dot plot
+        # no line joins the groups. (Only checked for dot panels: tracing
+        # costs a few hundred ms.)
+        if panel.kind == "dot":
+            for s in find_series(image, ink, dark, x_lo, right, max(0, top), axis_y, line_w):
+                through = sum(1 for b in panel.bars
+                              if s.y_at((b.x1 + b.x2) / 2) is not None
+                              and abs(s.y_at((b.x1 + b.x2) / 2) - b.top_px) <= 3 * line_w + 4)
+                if through >= 2 and through >= 0.5 * len(panel.bars):
+                    return None          # a line plot: the Line Analyzer's job
+        # A rug of data ticks along the x axis (under a line or density plot)
+        # reads as many slivers; real bar charts are not all slivers.
+        if panel.kind == "bar" and all(abs(b.top_px - base_y) < 0.04 * (axis_y - top) for b in panel.bars):
+            return None
+        if panel.kind == "bar" and self._stacked(image, panel.bars, base_y, line_w):
             return None                 # stacked bars: the top is a sum, not a group mean
         for bar in panel.bars:
             # the cap lies beyond the mean, away from zero (up for positive bars)
@@ -715,7 +786,13 @@ class FigureExtractor:
         # the characters stack vertically. Read those columns rotated and keep
         # whichever orientation the whole axis reads better in.
         n_up = sum(r[2] is not None for r in upright)
-        rotated = self._read_rotated_labels(image, ticks, label_right, spacing)
+        # (OCR is most of the run time: skip the rotated read when the
+        # upright labels already calibrate the whole axis)
+        up_fit = robust_linear_fit([(r[0], r[2]) for r in upright if r[2] is not None])
+        labelled_up = sum(1 for r in upright if r[1].strip())
+        clean = up_fit[0] is not None and up_fit[2] >= 3 and up_fit[2] >= 0.8 * max(labelled_up, 1) \
+            and _plausible_axis(up_fit[0], [t[0] for t in ticks], up_fit[2])
+        rotated = [] if clean else self._read_rotated_labels(image, ticks, label_right, spacing)
         if rotated:
             n_rot = sum(r[2] is not None for r in rotated)
 
@@ -724,7 +801,16 @@ class FigureExtractor:
             # an upright read of a vertical label catches one glyph ("8." for
             # "0.8"): the rotated read wins when it parses as many labels and
             # captures more of each, or reads them more confidently
-            if n_rot > n_up or (n_rot == n_up and n_rot > 0 and (
+            # first ask which reading calibrates: an upright read of sideways
+            # "250", "200", ... gives "0" for every label, which parses but
+            # cannot fit an axis
+            def fit_n(rs):
+                return robust_linear_fit([(r[0], r[2]) for r in rs if r[2] is not None])[2]
+            n_fit_up, n_fit_rot = fit_n(upright), fit_n(rotated)
+            if n_fit_rot != n_fit_up:
+                if n_fit_rot > n_fit_up:
+                    readings = rotated
+            elif n_rot > n_up or (n_rot == n_up and n_rot > 0 and (
                     digits(rotated) > digits(upright) + 0.3 or
                     np.mean([r[3] for r in rotated]) > np.mean([r[3] for r in upright]) + 0.05)):
                 readings = rotated
@@ -738,7 +824,9 @@ class FigureExtractor:
         a, b, n = robust_linear_fit(pts)
         if a is not None and not _plausible_axis(a, [t[0] for t in ticks], n):
             a, b, n = None, None, 0
-        if a is not None and n < max(2, int(np.ceil(0.4 * len(ticks)))):
+        # (minor ticks carry no label: count the labelled ones)
+        labelled = sum(1 for r in readings if r[1].strip()) or len(ticks)
+        if a is not None and n < max(2, int(np.ceil(0.4 * labelled))):
             a, b, n = None, None, 0      # too few labels agree: likely not an axis
         # Log axes (1, 10, 100 or 200, 400, 800): labels are linear in log10.
         # Only a last resort: when no linear calibration works and the log
@@ -998,21 +1086,172 @@ class FigureExtractor:
                 return pieces
         return [(s, e)]
 
+    def _build_line_panel(self, image, gray, dark, ink, panel, opts, line_w, x_lo, right, top,
+                          axis_left, axis_y, tick_rows, H, W) -> Optional[Panel]:
+        """Line plot: series traced by colour, points at markers or x ticks."""
+        # bar charts and box plots also have long dark structures: leave them
+        if len(self._find_bars(image, gray, dark, ink, x_lo, right, top, axis_y, line_w, tick_rows)) >= 2:
+            return None
+        if self._find_box_plot(image, gray, dark, ink, x_lo, right, top, axis_y, line_w, tick_rows):
+            return None
+        series = find_series(image, ink, dark, x_lo, right, max(0, top), axis_y, line_w)
+        if not series:
+            return None
+        panel.kind, panel.series = "line", series
+        # A marker hidden under another series' marker leaves a gap at an x
+        # where the other series have points: read it from the trace there.
+        xs = sorted(pt.x_px for s in series if s.markers for pt in s.points)
+        cols = []
+        for x in xs:
+            if cols and x - cols[-1][-1] <= 3 * line_w + 4:
+                cols[-1].append(x)
+            else:
+                cols.append([x])
+        # (groups in one plot share their x positions: one visible marker is enough)
+        cols = [float(np.median(c)) for c in cols]
+        for s in series:
+            if not s.markers:
+                continue
+            for cx in cols:
+                if any(abs(pt.x_px - cx) <= 3 * line_w + 4 for pt in s.points):
+                    continue
+                # the segments either side still aim at the hidden point
+                half = 3 * line_w + 4
+                y = s.line_y_at(cx, half, [pt.x_px for pt in s.points])
+                if y is None:
+                    y = s.y_at(cx)
+                if y is None:
+                    continue
+                s.points.append(LinePoint(x_px=cx, y_px=y, uncertain=True))
+            s.points.sort(key=lambda pt: pt.x_px)
+        self._calibrate_x(panel, image, dark, x_lo, right, int(round(axis_y)), line_w)
+        tick_xs = [t[0] for t in panel.x_ticks]
+        spacing = float(np.median(np.diff(tick_xs))) if len(tick_xs) > 1 else None
+        for s in series:
+            if not s.markers:
+                # no markers: the data are the trace, read at the x ticks
+                s.points = [LinePoint(x_px=tx, y_px=s.y_at(tx)) for tx in tick_xs if s.y_at(tx) is not None]
+            for pt in s.points:
+                pt.mean = panel.value_at(pt.y_px)
+                # error bars may be one-sided; use the side that is drawn
+                if pt.cap_hi_px is not None:
+                    pt.mean_plus_err = panel.value_at(pt.cap_hi_px)
+                elif pt.cap_lo_px is not None and pt.mean is not None:
+                    pt.mean_plus_err = 2 * pt.mean - panel.value_at(pt.cap_lo_px)
+                pt.x = panel.x_value_at(pt.x_px)
+                if tick_xs and spacing:
+                    j = int(np.argmin([abs(tx - pt.x_px) for tx in tick_xs]))
+                    if abs(tick_xs[j] - pt.x_px) <= 0.35 * spacing:
+                        pt.x_label = panel.x_ticks[j][2]
+        series[:] = [s for s in series if s.points]
+        if not series:
+            return None
+        if opts.titles:
+            panel.y_title = self._read_y_title(image, panel)
+        panel.y2 = int(min(H - 1, axis_y + 0.12 * H))
+        panel.x1 = int(max(0, axis_left - 0.12 * W))
+        return panel
+
+    def _calibrate_x(self, panel: Panel, image, dark, x_lo, x_hi, axis_row, line_w) -> None:
+        """
+        x tick marks hang below the x axis; their labels sit under them.
+        Numeric labels give a linear calibration; otherwise the label text is
+        kept for each tick (categorical x).
+        """
+        H, W = dark.shape
+        y0 = axis_row + (line_w + 1) // 2 + 1
+        reach = 15
+        ticks = []
+        if y0 + 3 < H:
+            run = np.zeros(W, int)
+            for c in range(max(0, x_lo), min(W, x_hi + 1)):
+                col = dark[y0:min(H, y0 + reach), c]
+                run[c] = int(np.argmin(col)) if not col.all() else col.size
+            for s, e in _runs((run >= 3) & (run < reach)):
+                if e - s + 1 <= 3 * line_w + 3:
+                    ticks.append(((s + e) / 2.0, int(np.median(run[s:e + 1]))))
+        if len(ticks) < 2:
+            return
+        spacing = float(np.median(np.diff([t[0] for t in ticks])))
+        half = int(max(8, min(0.48 * spacing, 60)))
+        pts = []
+        for tx, tl in ticks:
+            ya = y0 + tl + 1
+            yb = min(H, ya + 40)
+            xa, xb = int(max(0, tx - half)), int(min(W, tx + half + 1))
+            text, val = "", None
+            if yb - ya > 6 and xb - xa > 4:
+                band = cv2.cvtColor(image[ya:yb, xa:xb], cv2.COLOR_BGR2GRAY) < TEXT_THRESHOLD
+                if band.any():
+                    # the first text line under the tick (the axis title is further down)
+                    first = _runs(band.any(axis=1))[0]
+                    cols = np.where(band[first[0]:first[1] + 1].any(axis=0))[0]
+                    crop = image[max(0, ya + first[0] - 3): ya + first[1] + 4,
+                                 max(0, xa + cols[0] - 3): xa + cols[-1] + 4]
+                    if crop.size:
+                        text, _ = self.ocr.line(crop)
+                        val = parse_number(text)
+            panel.x_ticks.append((float(tx), val, text))
+            if val is not None:
+                pts.append((tx, val))
+        # the fit expects values to fall as pixels grow (a y axis): mirror x
+        a, b, n = robust_linear_fit([(-px, v) for px, v in pts])
+        if a is not None and n >= max(2, int(np.ceil(0.5 * len(ticks)))):
+            panel.x_slope, panel.x_intercept = -a, b
+
+    def _finish_box_panel(self, image, gray, panel, opts, line_w, axis_left, axis_y, H, W) -> Panel:
+        """Values, names and title for a box or violin panel."""
+        for b in panel.boxes:
+            b.q1, b.median, b.q3 = (panel.value_at(b.q1_px), panel.value_at(b.median_px),
+                                    panel.value_at(b.q3_px))
+            if not b.quartiles:
+                b.q1 = b.q3 = None
+            b.lo, b.hi = panel.value_at(b.lo_px), panel.value_at(b.hi_px)
+            b.outliers = [panel.value_at(y) for y in b.outliers_px]
+            b.mean_marker = panel.value_at(b.mean_px)
+        if opts.bar_names:
+            self._read_bar_names(image, gray, panel, line_w)
+        if opts.titles:
+            panel.y_title = self._read_y_title(image, panel)
+        panel.y2 = int(min(H - 1, axis_y + 0.12 * H))
+        panel.x1 = int(max(0, axis_left - 0.12 * W))
+        return panel
+
+    def _foreground(self, gray, region_ink, y_lo, y_hi, x_lo, x_hi, line_w, rows) -> np.ndarray:
+        """plot_foreground, computed once per region of the current figure."""
+        if gray is not getattr(self, "_fg_gray", None):
+            # (bars below zero run on a mirrored copy: not cached)
+            return plot_foreground(gray, region_ink, y_lo, y_hi, x_lo, x_hi, line_w, rows)
+        key = (y_lo, y_hi, x_lo, x_hi, line_w, tuple(rows or ()))
+        if key not in self._fg_cache:
+            self._fg_cache[key] = plot_foreground(gray, region_ink, y_lo, y_hi, x_lo, x_hi, line_w, rows)
+            self._fg_cache[key].setflags(write=False)
+        return self._fg_cache[key]
+
+    def _find_violin_plot(self, image, gray, dark, ink, x_lo, x_hi, top, axis_y, line_w, tick_rows) -> List[Box]:
+        y_lo, y_hi = max(0, top), int(round(axis_y)) + 1
+        region_ink = ink[y_lo:y_hi, x_lo:x_hi + 1]
+        if region_ink.size == 0:
+            return []
+        fg = self._foreground(gray, region_ink, y_lo, y_hi, x_lo, x_hi, line_w, tick_rows)
+        return find_violins(image, gray, dark, ink, fg, x_lo, y_lo, axis_y, line_w)
+
     def _find_box_plot(self, image, gray, dark, ink, x_lo, x_hi, top, axis_y, line_w, tick_rows) -> List[Box]:
         y_lo, y_hi = max(0, top), int(round(axis_y)) + 1
         region_ink = ink[y_lo:y_hi, x_lo:x_hi + 1]
         if region_ink.size == 0:
             return []
-        fg = plot_foreground(gray, region_ink, y_lo, y_hi, x_lo, x_hi, line_w, tick_rows)
+        fg = self._foreground(gray, region_ink, y_lo, y_hi, x_lo, x_hi, line_w, tick_rows)
         return find_boxes(image, gray, dark, ink, fg, x_lo, y_lo, axis_y, line_w)
 
     @staticmethod
-    def _stacked(image, bars: List[Bar], axis_y: float, line_w: int) -> bool:
+    def _stacked(image, bars: List[Bar], base_y: float, line_w: int) -> bool:
         """True when most bars are built from 3+ distinct colour bands (a stacked chart)."""
         stacked = 0
         for b in bars:
             w = b.x2 - b.x1
-            y0, y1 = int(min(b.top_px, axis_y)) + line_w + 2, int(max(b.top_px, axis_y)) - line_w - 2
+            # between the bar top and its base (the zero row, not the axis below it)
+            y0, y1 = int(min(b.top_px, base_y)) + line_w + 2, int(max(b.top_px, base_y)) - line_w - 2
             if y1 - y0 < 12 or w < 8:
                 continue
             block = image[y0:y1, b.x1 + int(0.2 * w): b.x2 - int(0.2 * w)]
@@ -1069,7 +1308,7 @@ class FigureExtractor:
         region_ink = ink[y_lo:y_hi, x_lo:x_hi + 1]
         if region_ink.size == 0:
             return []
-        fg = plot_foreground(gray, region_ink, y_lo, y_hi, x_lo, x_hi, line_w, grid_rows)
+        fg = self._foreground(gray, region_ink, y_lo, y_hi, x_lo, x_hi, line_w, grid_rows)
         h = fg.shape[0]
 
         # Column profile: unbroken foreground height standing on the x-axis.

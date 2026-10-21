@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
-import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
-import BarAnalyzer from './components/BarAnalyzer';
+import { BrowserRouter as Router, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
 import BatchExtractor from './components/BatchExtractor';
 import 'bootstrap/dist/css/bootstrap.min.css';
 
@@ -67,11 +66,11 @@ const HomePage = () => (
           <Link to="/tutorial" className="btn btn-primary me-3">
             <i className="bi bi-play-circle me-2"></i>Start Learning
           </Link>
-          <Link to="/extract" className="btn btn-primary me-3">
-            <i className="bi bi-files me-2"></i>Batch Extract Papers
+          <Link to="/bar_analyzer" className="btn btn-outline-primary me-3">
+            <i className="bi bi-graph-up me-2"></i>Bar Analyzer
           </Link>
-          <Link to="/bar_analyzer" className="btn btn-outline-primary">
-            <i className="bi bi-graph-up me-2"></i>Try Bar Analyzer
+          <Link to="/box_analyzer" className="btn btn-outline-primary">
+            <i className="bi bi-box me-2"></i>Box Analyzer
           </Link>
         </div>
       </div>
@@ -80,11 +79,12 @@ const HomePage = () => (
     <div className="features-section">
       <div className="row g-4">
         {[
-          { icon: 'bi-graph-up-arrow', title: 'Bar Graph Analysis', desc: 'Extract precise measurements from bar charts with AI-powered detection and interactive editing tools.', link: '/bar_analyzer' },
+          { icon: 'bi-graph-up-arrow', title: 'Bar Graph Analysis', desc: 'Drop in whole papers: every bar chart and dot plot is measured (means and error bars) and exported in long format.', link: '/bar_analyzer' },
           { icon: 'bi-box', title: 'Box Plot Analysis', desc: 'Read min, quartiles, median and max from box plots and estimate mean and SD for meta-analysis (Luo, Shi, Wan, Hozo).', link: '/box_analyzer' },
-          { icon: 'bi-graph-up', title: 'Line Graph Analysis', desc: 'Extract data points and trends from line graphs with precision and accuracy.', link: '/line_analyzer' }
+          { icon: 'bi-vinyl', title: 'Violin Plot Analysis', desc: 'Read the ends, quartile and median lines (or an inner box plot) of violin plots and estimate mean and SD.', link: '/violin_analyzer' },
+          { icon: 'bi-graph-up', title: 'Line Graph Analysis', desc: 'Trace each series of a line plot: every point with its error bar, and the x value from the axis.', link: '/line_analyzer' }
         ].map((feature, i) => (
-          <div key={i} className="col-lg-4 col-md-6">
+          <div key={i} className="col-lg-3 col-md-6">
             <div className="card border-0 shadow-sm h-100">
               <div className="card-body text-center">
                 <div className="feature-icon-compact mb-3">
@@ -726,6 +726,24 @@ const TutorialPage = () => {
   );
 };
 
+// One page per chart type. Both stay mounted once visited, so dropped papers
+// and edits are kept while you switch pages; only the current one is shown.
+const ANALYZER_PATHS = {
+  '/bar_analyzer': 'bar', '/box_analyzer': 'box', '/violin_analyzer': 'violin', '/line_analyzer': 'line',
+};
+
+const AnalyzerPages = () => {
+  const { pathname } = useLocation();
+  const current = ANALYZER_PATHS[pathname.replace(/\/+$/, '')];
+  const [visited, setVisited] = useState({});
+  if (current && !visited[current]) setVisited((v) => ({ ...v, [current]: true }));
+  return ['bar', 'box', 'violin', 'line'].map((mode) => (visited[mode] || current === mode) && (
+    <div key={mode} style={{ display: current === mode ? 'block' : 'none' }}>
+      <BatchExtractor mode={mode} />
+    </div>
+  ));
+};
+
 function App() {
   return (
     <Router>
@@ -741,9 +759,9 @@ function App() {
             <ul className="navbar-nav">
               <li className="nav-item"><Link className="nav-link" to="/">Home</Link></li>
               <li className="nav-item"><Link className="nav-link" to="/tutorial">Tutorial</Link></li>
-              <li className="nav-item"><Link className="nav-link" to="/extract">Batch Extract</Link></li>
               <li className="nav-item"><Link className="nav-link" to="/bar_analyzer">Bar Analyzer</Link></li>
               <li className="nav-item"><Link className="nav-link" to="/box_analyzer">Box Analyzer</Link></li>
+              <li className="nav-item"><Link className="nav-link" to="/violin_analyzer">Violin Analyzer</Link></li>
               <li className="nav-item"><Link className="nav-link" to="/line_analyzer">Line Analyzer</Link></li>
             </ul>
           </div>
@@ -753,13 +771,17 @@ function App() {
       {/* Main Content */}
       <div className="container-fluid content mt-4">
         <Routes>
-          <Route path="/bar_analyzer" element={<BarAnalyzer />} />
-          <Route path="/extract" element={<BatchExtractor />} />
-          {/* box plots are detected on the Batch Extract page alongside bar charts */}
-          <Route path="/box_analyzer" element={<BatchExtractor />} />
+          {/* the analyzer pages are rendered below so their results survive navigation */}
+          <Route path="/bar_analyzer" element={null} />
+          <Route path="/box_analyzer" element={null} />
+          <Route path="/violin_analyzer" element={null} />
+          <Route path="/line_analyzer" element={null} />
+          {/* the old combined page */}
+          <Route path="/extract" element={<Navigate to="/bar_analyzer" replace />} />
           <Route path="/tutorial" element={<TutorialPage />} />
           <Route path="/" element={<HomePage />} />
         </Routes>
+        <AnalyzerPages />
       </div>
 
       {/* Footer */}

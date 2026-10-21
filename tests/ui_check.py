@@ -35,7 +35,7 @@ def nums(page, row, cols):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("base", nargs="?", default="http://127.0.0.1:9000")
+    ap.add_argument("base", nargs="?", default="http://127.0.0.1:2800")
     ap.add_argument("--chart", default=None, help="chart image (default: a generated one)")
     ap.add_argument("--pdf", default=None)
     ap.add_argument("--shots", default=None)

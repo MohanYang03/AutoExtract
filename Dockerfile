@@ -1,5 +1,5 @@
 # Build: docker build -t yourdockerhub/autoextract:latest .
-# Run:  docker run --rm -p 9000:9000 yourdockerhub/autoextract:latest
+# Run:  docker run --rm -p 2800:2800 yourdockerhub/autoextract:latest
 # Optional custom weights: -v /path/to/best.pt:/app/backend/models/best.pt:ro
 
 FROM node:22-bookworm-slim AS frontend-build
@@ -36,10 +36,10 @@ COPY --from=frontend-build /app/frontend/dist ./frontend_dist
 ENV PYTHONPATH=/app/backend \
     FRONTEND_DIST=/app/frontend_dist \
     DEBUG=false \
-    PORT=9000
+    PORT=2800
 
 WORKDIR /app/backend
-EXPOSE 9000
+EXPOSE 2800
 
 # Long timeout: first YOLO / torch load and image analysis can be slow on CPU
-CMD ["gunicorn", "--bind", "0.0.0.0:9000", "--workers", "1", "--threads", "4", "--timeout", "300", "wsgi:application"]
+CMD ["gunicorn", "--bind", "0.0.0.0:2800", "--workers", "1", "--threads", "4", "--timeout", "300", "wsgi:application"]

@@ -42,7 +42,7 @@ From the `AutoDigitizer` folder:
 .venv/bin/python backend/app.py          # macOS / Linux
 ```
 
-Open **http://localhost:9000/extract** in your browser. Keep the terminal open while you use it; press **Ctrl+C** to stop.
+Open **http://localhost:2800/extract** in your browser. Keep the terminal open while you use it; press **Ctrl+C** to stop.
 
 ## Update to the latest version
 
@@ -60,7 +60,7 @@ Then run it as above.
 - **`python` not found (Windows)**: reinstall Python with "Add python.exe to PATH" ticked, or use `py -3.12 -m venv .venv`.
 - **pip can't find `torch==2.3.0`**: your Python is too new; install Python 3.12 and recreate `.venv`.
 - **pip error mentioning "Long Path support" (Windows)**: the folder path is too long for PyTorch's files. Clone somewhere shorter (e.g. `C:\Code\AutoDigitizer`), delete `.venv`, and run the setup again.
-- **Port 9000 already in use**: start on another port, e.g. PowerShell `$env:PORT=9001; .venv\Scripts\python backend\app.py`, then open http://localhost:9001/extract.
+- **Port 2800 already in use**: start on another port, e.g. PowerShell `$env:PORT=2801; .venv\Scripts\python backend\app.py`, then open http://localhost:2801/extract.
 - **`git clone` asks for access / "repository not found"**: the repository is private; ask the owner to add your GitHub account as a collaborator.
 
 ## Docker (optional)
@@ -71,10 +71,10 @@ Instead of the Python/Node setup, with Docker installed:
 git clone https://github.com/gordonzyxu/AutoDigitizer.git
 cd AutoDigitizer
 docker build -t autodigitizer .
-docker run --rm -p 9000:9000 autodigitizer
+docker run --rm -p 2800:2800 autodigitizer
 ```
 
-Open **http://localhost:9000/extract**. The image includes the built page and the Bar Analyzer weights (`backend/models/best.pt`); to use your own weights add `-v /absolute/path/best.pt:/app/backend/models/best.pt:ro` to `docker run`.
+Open **http://localhost:2800/extract**. The image includes the built page and the Bar Analyzer weights (`backend/models/best.pt`); to use your own weights add `-v /absolute/path/best.pt:/app/backend/models/best.pt:ro` to `docker run`.
 
 ## Batch Extract
 

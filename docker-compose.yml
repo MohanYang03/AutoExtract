@@ -5,6 +5,6 @@ services:
   autoextract:
     build: .
     ports:
-      - "9000:9000"
+      - "2800:2800"
     environment:
       DEBUG: "false"

@@ -1,6 +1,6 @@
 # AutoDigitizer
 
-A web app that extracts data from bar charts in scientific papers. Drop in whole PDFs: every bar chart and dot plot is found, its y-axis calibrated from all tick labels, and each group's mean and error bar measured from the pixels. Results go to one Excel workbook laid out like a meta-analysis long-format sheet, ready to paste.
+A web app that extracts data from bar charts and box plots in scientific papers. Drop in whole PDFs: every bar chart, dot plot and box plot is found, its y-axis calibrated from all tick labels, and each group's mean and error bar (or min, quartiles, median and max) measured from the pixels. Box plots also get an estimated mean and SD for meta-analysis. Results go to one Excel workbook laid out like a meta-analysis long-format sheet, ready to paste.
 
 Built on [AutoExtract](https://github.com/MohanYang03/AutoExtract) by Mohan Yang; its YOLO-based single-image Bar Analyzer is still included. The backend runs on Flask; the frontend is a Vite + React app.
 
@@ -84,6 +84,13 @@ Open **http://localhost:2800/extract**. The image includes the built page and th
 4. Set the error-bar type per panel (**SEM/SD**, defaulted from the figure caption) and the sample size **n**; the other of SD/SEM is computed.
 5. **Copy rows** pastes straight into a long-format sheet; **Download Excel** gives one workbook for everything.
 
+Box plots appear on the same page (the **Box Analyzer** link opens it too). Each box shows min, Q1, median, Q3 and max; drag any of those lines to correct it. Per panel, choose:
+
+- **Whiskers**: *Min–max* (whiskers are the range), *1.5×IQR* (Tukey), *Percentile* or *Not stated*. Only min–max whiskers are used as the range; otherwise only the quartiles are used.
+- **Mean**: Luo 2018 (recommended), Wan 2014 or Hozo 2005. **SD**: Shi 2020 (recommended), Wan 2014 or Hozo 2005.
+
+Type **n** per box (or the same n for every box); the estimated mean and SD appear once n is known. A ⚠ marks skewed boxes, where normal-theory estimates may be biased.
+
 Options (numbers are always extracted):
 
 | Option | Default | What it does |
@@ -99,7 +106,9 @@ Each panel gets a sheet whose first 12 columns are:
 
 `mean, sd, age(week), sex(male), acupoint, treatment_group, sample_size, treatment_duration, depression_model_duration, paper_id, sem, mean+sem`
 
-The measured error goes in `sem` (or `sd`, with the last column named `mean+sd`); the other is a live formula on `sample_size`. `paper_id` is filled from folder names like `(paper11) ...`. An **All bars** sheet stacks every panel with source/figure/panel columns, and **Summary** lists each panel with how many tick labels were used and how many bars need a check.
+The measured error goes in `sem` (or `sd`, with the last column named `mean+sd`); the other is a live formula on `sample_size`. `paper_id` is filled from folder names like `(paper11) ...`. An **All data** sheet stacks every panel with source/figure/panel columns, and **Summary** lists each panel with how many tick labels were used and how many values need a check.
+
+Box-plot sheets fill `mean` and `sd` with live formulas that estimate them from the min/Q1/median/Q3/max columns (written to the right) and `sample_size`, using the panel's chosen methods; `sem` is `sd/√n`. They fill in as soon as n is typed.
 
 ### Command line
 
@@ -112,7 +121,7 @@ python backend/batch_extract.py "path/to/papers" --out results.xlsx --review rev
 
 ### What it handles
 
-Bar charts with or without outlines, white/coloured/dark fills, black or coloured error bars, scatter dots over bars, gridlines, boxed plots, axes that go below zero (bars hang down from zero), axes without tick marks, small low-resolution figures, multi-panel figures, and dot plots (mean line ± whiskers). Box plots, stacked bars, line graphs and micrographs are skipped.
+Bar charts with or without outlines, white/coloured/dark fills, black or coloured error bars, scatter dots over bars, gridlines, boxed plots, axes that go below zero (bars hang down from zero), axes without tick marks, small low-resolution figures, multi-panel figures, and dot plots (mean line ± whiskers), and box plots (white, filled or dark boxes, with or without caps, dashed whiskers, outliers, mean markers, log axes). Stacked bars, violin plots, line graphs and micrographs are skipped.
 
 ### Accuracy
 
@@ -123,6 +132,9 @@ Measured against hand-digitized meta-analysis spreadsheets (21 papers, 98 sheets
 - 200 random synthetic charts: 97 % measured exactly right (every mean within 1 %), and every *unflagged* error bar within 1 %.
 - A whole paper (27 panels) extracts in about 5 s on a laptop CPU.
 
+- Box plots, synthetic (exact statistics): 92–95 % of charts have every min/Q1/median/Q3/max within 1 %.
+- Real charts from PubMed Central ([CHART-Info 2022](https://chartinfo.github.io/) test set, hand-annotated): box quartiles and medians within 1 % of the axis for 88–91 % of matched boxes; non-stacked bar values within 1 % for 77 %.
+
 The original two-label YOLO pipeline scored 17 % mean error on the same 30 bars.
 
 ## Tests and benchmarks
@@ -131,15 +143,16 @@ The original two-label YOLO pipeline scored 17 % mean error on the same 30 bars.
 .venv/bin/python -m pip install -r requirements-dev.txt   # Windows: .venv\Scripts\python
 # run the commands below with the same .venv python
 python -m pytest tests -q                 # synthetic accuracy + API tests
-python tests/fuzz.py 200                  # randomised stress test
+python tests/fuzz.py 200                  # randomised stress test (add --box for box plots)
 python tests/ui_check.py                  # headless browser check (app must be running)
 python eval/run_eval.py --data "path/to/mice studies"   # vs hand-digitized sheets
 python eval/sweep.py --data "path/to/mice studies"      # every paper in the folder
+python eval/chartinfo_eval.py --data path/to/ICPR2022_CHARTINFO_UB_UNITEC_PMC_TEST_v2.1   # real-chart benchmark (download separately; CC BY-NC-SA, don't commit)
 ```
 
 ## API Overview
 
-- POST `/api/extract`: multipart `file` (PDF or image), optional `options` (JSON: `bar_names`, `titles`, `legend_colors`), `error_type` (`sem`/`sd`) and `job`. Returns every panel found with its calibration, bars (`mean`, `mean_plus_err`, pixel positions, `uncertain` flag) and a figure image URL.
+- POST `/api/extract`: multipart `file` (PDF or image), optional `options` (JSON: `bar_names`, `titles`, `legend_colors`), `error_type` (`sem`/`sd`) and `job`. Returns every panel found with its calibration, `kind` (`bar`, `dot` or `box`), bars (`mean`, `mean_plus_err`, pixel positions, `uncertain` flag) or boxes (`lo`, `q1`, `median`, `q3`, `hi`, outliers, pixel positions) and a figure image URL.
 - POST `/api/export`: JSON `{figures: [...]}` (as returned, possibly edited). Returns the `.xlsx` workbook.
 - POST `/api/bar_analyzer`: classic single-image YOLO analysis (multipart `file`).
 - POST `/api/update_values`: JSON `{ "origin_value": number|string, "ymax_value": number|string }`
@@ -148,6 +161,8 @@ python eval/sweep.py --data "path/to/mice studies"      # every paper in the fol
 
 Backend (`backend/`)
 - `figure_extractor.py`: geometry-based extraction (axes, tick calibration, bars, error bars, dot plots, labels)
+- `box_plots.py`: box-plot detection (quartiles, median, whiskers, outliers, mean markers)
+- `estimators.py`: mean/SD from box-plot statistics (Luo, Wan, Shi, Hozo)
 - `pdf_utils.py`: figure images and captions from PDFs (SEM/SD from the caption)
 - `exporter.py`: long-format workbook and review overlays
 - `batch_extract.py`: command-line batch runner
@@ -157,7 +172,7 @@ Backend (`backend/`)
 - `config.py`: Centralized settings (paths, ports, secrets, model, classes)
 
 Frontend (`frontend/`)
-- `src/components/BatchExtractor.jsx`, `PanelEditor.jsx`: Batch Extract page
+- `src/components/BatchExtractor.jsx`, `PanelEditor.jsx`, `BoxPanelEditor.jsx`: Batch Extract page (bar/dot and box panels)
 - `src/components/BarAnalyzer.jsx`: classic interactive viewer (Fabric.js)
 - Proxy config in `vite.config.js` to reach Flask during development
 

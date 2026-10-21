@@ -84,15 +84,19 @@ def run(paths: Iterable[str], out_path: str, review_dir: Optional[str] = None,
             found += len(panels)
             if review_dir:
                 os.makedirs(review_dir, exist_ok=True)
-                stem = os.path.splitext(os.path.basename(path))[0]
+                # paper titles make long file names; Windows paths stop at 260 chars
+                stem = os.path.splitext(os.path.basename(path))[0][:60].rstrip(" .")
                 tag = f"fig{fig['figure']}" if fig["figure"] else f"page{fig['page'] + 1}"
                 ok, buf = cv2.imencode(".png", draw_overlay(fig["image"], panels))
                 if ok:
-                    buf.tofile(os.path.join(review_dir, f"{stem}_{tag}_{fig['page']}.png"))
+                    try:
+                        buf.tofile(os.path.join(review_dir, f"{stem}_{tag}_{fig['page']}.png"))
+                    except OSError as e:   # a review image must not stop the run
+                        print(f"  could not save review image: {e}")
         print(f"[{fi}/{len(files)}] {os.path.basename(path)}: {found} panels ({time.time() - t0:.1f}s)")
 
     if not results:
-        print("No bar charts found.")
+        print("No bar charts or box plots found.")
         return results
     build_workbook(results).save(out_path)
     print(f"\nWrote {len(results)} panels, {sum(len(r.panel.bars) for r in results)} bars "

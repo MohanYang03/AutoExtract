@@ -130,6 +130,52 @@ def main() -> int:
             n_cards = page.locator(".panel-card").count()
             check(n_cards > 5, f"paper panels shown: {n_cards}")
 
+        print("box plot on the same page")
+        import tempfile
+        import cv2
+        sys.path.insert(0, HERE)
+        from synth import BoxSpec, render_box
+        box_png = os.path.join(tempfile.mkdtemp(), "box_chart.png")
+        cv2.imwrite(box_png, render_box(BoxSpec([(2, 5, 7, 9, 13), (4, 8, 11, 15, 19)], ylim=(0, 20))))
+        page.set_input_files("#batch-input", box_png)
+        page.wait_for_function("document.querySelectorAll('.panel-card').length >= 2", timeout=60000)
+        card = page.locator(".panel-card").last
+        check(card.get_by_text("box plot").count() > 0, "box panel recognised")
+        cells = card.locator("table tbody tr").first.locator("td").all_inner_texts()
+        five = [float(c) for c in cells[2:7]]
+        check(all(abs(a - b) < 0.25 for a, b in zip(five, [2, 5, 7, 9, 13])), f"five-number summary {five}")
+        check(cells[8].strip() == "", "no estimate before n")
+        card.locator("input[type=number]").last.fill("12")
+        card.get_by_role("button", name="Apply").click()
+        cells = card.locator("table tbody tr").first.locator("td").all_inner_texts()
+        est_mean, est_sd = float(cells[8]), float(cells[9])
+        check(6.5 < est_mean < 7.6 and 2 < est_sd < 4.5, f"estimates with n=12: mean {est_mean}, sd {est_sd}")
+        card.locator("select").first.select_option("tukey")
+        cells = card.locator("table tbody tr").first.locator("td").all_inner_texts()
+        check(float(cells[9]) != est_sd, f"whisker type changes SD {est_sd} -> {cells[9]}")
+        print("drag a median")
+        bsvg = card.locator(".panel-svg")
+        med = bsvg.locator("line[stroke='#0d6efd']").first
+        bsvg.scroll_into_view_if_needed()
+        mb = med.bounding_box()
+        page.mouse.move(mb["x"] + mb["width"] / 2, mb["y"] + mb["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(mb["x"] + mb["width"] / 2, mb["y"] + mb["height"] / 2 - 20, steps=5)
+        page.mouse.up()
+        new_med = float(card.locator("table tbody tr").first.locator("td").all_inner_texts()[4])
+        check(new_med > 7.3, f"drag raised median 7 -> {new_med}")
+        card.get_by_role("button", name="Copy rows").click()
+        bclip = page.evaluate("navigator.clipboard.readText()").split("\n")
+        check(len(bclip) == 2 and bclip[0].split("\t")[0] != "" and bclip[0].split("\t")[6] == "12",
+              "box clipboard rows carry estimated mean and n")
+        with page.expect_download() as dl:
+            page.get_by_role("button", name="Download Excel").click()
+        wb = openpyxl.load_workbook(io.BytesIO(open(dl.value.path(), "rb").read()))
+        bws = wb[wb.sheetnames[-1]]
+        bhead = [c.value for c in bws[1]]
+        check("Q1" in bhead and str(bws.cell(2, 1).value).startswith("=IF("), "box sheet has formulas and quartiles")
+        check("boxes" in page.locator(".results-toolbar").inner_text(), "toolbar counts boxes")
+
         print("exclude a panel")
         text0 = page.locator(".results-toolbar").inner_text()
         page.get_by_role("button", name="Exclude").first.click()

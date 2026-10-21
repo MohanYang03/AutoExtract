@@ -20,11 +20,14 @@ Pipeline per figure:
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
+
+from box_plots import Box, find_boxes
 
 
 DARK_THRESHOLD = 128      # gray < this counts as "ink" (lines, text, outlines)
@@ -86,16 +89,28 @@ class Panel:
     calibration_inliers: int = 0
     label_left: Optional[int] = None   # left edge of the tick labels (px)
     bars: List[Bar] = field(default_factory=list)
+    boxes: List[Box] = field(default_factory=list)
     y_title: str = ""
     letter: str = ""          # panel letter ("A", "B", ...) if one was found
-    kind: str = "bar"         # "bar", or "dot" for mean-line-and-whisker scatter plots
+    kind: str = "bar"         # "bar", "dot" (mean line ± whiskers) or "box"
+    scale: str = "linear"     # y-axis scale: "linear" or "log" (log10)
     error_type: str = "sem"   # what the error bars show: "sem" or "sd" (from the caption, editable)
+    # box plots: what the whiskers show and how mean/SD are estimated
+    whisker_type: str = "minmax"      # "minmax" | "tukey" | "percentile" | "unknown"
+    mean_method: str = "luo"          # "luo" | "wan" | "hozo"
+    sd_method: str = "shi"            # "shi" | "wan" | "hozo"
     warnings: List[str] = field(default_factory=list)
 
-    def value_at(self, py: float) -> Optional[float]:
-        if self.slope is None:
+    def value_at(self, py: Optional[float]) -> Optional[float]:
+        if self.slope is None or py is None:
             return None
-        return self.slope * py + self.intercept
+        v = self.slope * py + self.intercept
+        return float(10 ** v) if self.scale == "log" else v
+
+    @property
+    def items(self) -> list:
+        """The measured groups: bars/dot groups, or boxes."""
+        return self.boxes if self.kind == "box" else self.bars
 
     def to_dict(self) -> dict:
         """JSON-ready dict (numpy scalars from OpenCV converted to plain Python)."""
@@ -108,8 +123,10 @@ class Panel:
     def from_dict(cls, d: dict) -> "Panel":
         names = {f for f in cls.__dataclass_fields__}
         bar_names = {f for f in Bar.__dataclass_fields__}
-        p = cls(**{k: v for k, v in d.items() if k in names and k != "bars"})
+        box_names = {f for f in Box.__dataclass_fields__}
+        p = cls(**{k: v for k, v in d.items() if k in names and k not in ("bars", "boxes")})
         p.bars = [Bar(**{k: v for k, v in b.items() if k in bar_names}) for b in d.get("bars", [])]
+        p.boxes = [Box(**{k: v for k, v in b.items() if k in box_names}) for b in d.get("boxes", [])]
         return p
 
 
@@ -151,7 +168,8 @@ _NUM_FIX = str.maketrans({"O": "0", "o": "0", "D": "0", "l": "1", "I": "1", "|":
 
 
 def parse_number(text: str) -> Optional[float]:
-    t = text.strip()
+    # full-width forms ("５", "．") come back from the recogniser sometimes
+    t = unicodedata.normalize("NFKC", text).strip()
     if t in ("。", "o", "O", "()", "D"):     # how a lone "0" tends to come back
         return 0.0
     if re.search(r"[A-Za-z]{2,}", t) or not re.search(r"\d", t):   # words, not a tick label
@@ -161,6 +179,10 @@ def parse_number(text: str) -> Optional[float]:
     t = t.translate(_NUM_FIX).replace(" ", "")
     # tolerate stray punctuation the recogniser glues on ("60.", "20÷", "50°")
     t = re.sub(r"^[^\d\-]+|[^\d]+$", "", t)
+    # Small labels lose their decimal point ("0.8" -> "08"); a tick label is
+    # never written with a leading zero, so restore it ("08" -> 0.8, "005" -> 0.05).
+    if re.fullmatch(r"-?0\d+", t):
+        t = t.replace("0", "0.", 1)
     m = re.fullmatch(r"-?\d+(\.\d+)?", t)
     return float(t) if m else None
 
@@ -262,8 +284,72 @@ def _plausible_axis(slope: float, tick_ys: List[float], inliers: int) -> bool:
     if len(ys) < 2 or slope >= 0:       # values must grow upward (pixel y shrinks)
         return False
     gaps = np.diff(ys)
-    spacing = float(np.median(gaps))
-    return _is_nice_step(abs(slope) * spacing) or (inliers >= 4 and _is_nice_step(abs(slope) * spacing / 2))
+    gaps = gaps[gaps > 2]
+    if gaps.size == 0:
+        return False
+    # A missed tick makes some gaps double: judge the step from the smallest
+    # regular gap (the median can land between 1x and 2x spacing).
+    small = float(np.min(gaps))
+    regular = gaps[gaps <= 1.3 * small]
+    spacing = float(np.median(regular)) if regular.size else small
+    step = abs(slope) * spacing
+    return _is_nice_step(step) or (inliers >= 4 and _is_nice_step(step / 2))
+
+
+def plot_foreground(gray, region_ink, y_lo, y_hi, x_lo, x_hi, line_w, grid_rows=None) -> np.ndarray:
+    """
+    Foreground of a plot region: everything except the open background.
+    Enclosed white areas (white bar/box interiors, hollow dots) count as
+    foreground. Light gridlines are removed first so they don't cut the
+    background into enclosed strips.
+    """
+    # Light gridlines would cut the background into enclosed strips that
+    # look like bar interior. A gridline is a thin row band where light
+    # ink covers a large share of the width (it shows between the bars);
+    # light-filled bars make thick bands instead, so they are kept.
+    region_gray = gray[y_lo:y_hi, x_lo:x_hi + 1]
+    # only vertically thin light ink can be a gridline; bar fill is tall
+    tall = cv2.morphologyEx(region_ink, cv2.MORPH_OPEN,
+                            cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))).astype(bool)
+    light = (region_gray > 140) & (region_ink == 1) & ~tall
+    frac = light.mean(axis=1)
+    keep_bottom = region_ink.shape[0] - (2 * line_w + 3)     # x-axis region stays
+    region_ink = region_ink.copy()
+    for s, e in _runs(frac >= 0.25):
+        if e - s + 1 <= 3 and e < keep_bottom:
+            region_ink[s:e + 1][light[s:e + 1]] = 0
+    # Gridlines sit on the tick rows and leave the y-axis: with only a
+    # couple of wide bars little of them shows, so check those rows directly.
+    for ty in grid_rows or []:
+        r = int(round(ty)) - y_lo
+        if 2 <= r < keep_bottom:
+            band = slice(r - 2, r + 3)
+            if light[band, :8].any(axis=0).mean() > 0.6:
+                region_ink[band][light[band]] = 0
+    # A light shaded band (highlighting a time window) runs from the top of
+    # the plot down to the axis; bars stop short of the top. Treat it as
+    # background so the bars drawn over it stand out.
+    h = region_ink.shape[0]
+    shade = ((region_gray > 190) & (region_ink == 1)).astype(np.uint8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(shade, connectivity=4)
+    for i in range(1, n):
+        x, y, w, hh, area = stats[i]
+        if y <= 2 * line_w + 4 and y + hh >= h - (2 * line_w + 6) and w >= 8 and area >= 0.5 * w * hh:
+            region_ink[labels == i] = 0
+    # Background = white area connected to the top of the plot. Anything
+    # enclosed (white bar interiors, hollow dots) counts as foreground.
+    bg = (1 - region_ink).astype(np.uint8)
+    n, labels = cv2.connectedComponents(bg, connectivity=4)
+    # seed from the top few rows (a boxed plot's frame line covers row 0)
+    # plus the largest white region, which is the plot's open background
+    seed_rows = labels[: min(labels.shape[0], 2 * line_w + 4), :]
+    outside_labels = set(np.unique(seed_rows)) - {0}
+    if n > 1:
+        areas = np.bincount(labels[bg == 1].ravel(), minlength=n)
+        areas[0] = 0
+        outside_labels.add(int(np.argmax(areas)))
+    outside = np.isin(labels, list(outside_labels)) & (bg == 1)
+    return ~outside
 
 
 # --------------------------------------------------------------------------- #
@@ -305,16 +391,16 @@ class FigureExtractor:
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         ink = ((gray < WHITE_THRESHOLD) | (hsv[:, :, 1] > 40)).astype(np.uint8)
 
-        panels = []
-        for axes in self._find_axes(dark, ink):
-            try:
-                panel = self._build_panel(image, gray, dark, ink, axes, opts)
-            except Exception as e:  # one bad panel must not sink the figure
-                print(f"panel at {axes} failed: {type(e).__name__}: {e}")
-                continue
-            if panel is not None and panel.bars and panel.slope is not None:
-                panels.append(panel)
-        panels = self._drop_nested(panels)
+        # A chart is mostly blank page; photos, micrographs and noise are not.
+        if ink.mean() > 0.85:
+            return []
+        panels = self._panels_from(image, gray, dark, ink, opts)
+        if not panels:
+            # Some styles draw axes and ticks in light grey; retry treating
+            # anything clearly darker than the page as line ink.
+            light_dark = (gray < 200).astype(np.uint8)
+            if light_dark.mean() < 0.35:
+                panels = self._panels_from(image, gray, light_dark, ink, opts)
 
         if opts.legend_colors and any(not any(b.label for b in p.bars) for p in panels):
             text_boxes = self.ocr.boxes(image)       # slow: only when asked for
@@ -324,6 +410,18 @@ class FigureExtractor:
                 p.letter = self._find_letter_glyph(image, dark, p)
         panels.sort(key=lambda p: (round(p.plot_top / max(image.shape[0] * 0.1, 1)), p.axis_x))
         return panels
+
+    def _panels_from(self, image, gray, dark, ink, opts) -> List[Panel]:
+        panels = []
+        for axes in self._find_axes(dark, ink):
+            try:
+                panel = self._build_panel(image, gray, dark, ink, axes, opts)
+            except Exception as e:  # one bad panel must not sink the figure
+                print(f"panel at {axes} failed: {type(e).__name__}: {e}")
+                continue
+            if panel is not None and panel.items and panel.slope is not None:
+                panels.append(panel)
+        return self._drop_nested(panels)
 
     @staticmethod
     def _drop_nested(panels: List[Panel]) -> List[Panel]:
@@ -402,6 +500,10 @@ class FigureExtractor:
             # to the left; at the real y-axis only a short tick does.
             cand = [y for y, r, l in rows if r >= 0.6 * longest and l < 60]
             if not cand:
+                detached = self._detached_x_axis(dark, ink, vx, vw, v_bottom, kh)
+                if detached:
+                    detached["top"] = vy
+                    found.append(detached)
                 continue
             # keep the lowest contiguous band (the axis, not a bar top above it)
             axis_rows = [cand[-1]]
@@ -435,6 +537,32 @@ class FigureExtractor:
                 uniq.append(f)
         return uniq
 
+    @staticmethod
+    def _detached_x_axis(dark, ink, vx, vw, v_bottom, kh) -> Optional[dict]:
+        """
+        R / Stata style axes don't meet: the y-axis stops at its last tick and
+        the x-axis starts a little to the right, slightly lower. Look for a
+        long horizontal line just below and right of the y-axis's end.
+        """
+        H, W = dark.shape
+        y_end = min(H, v_bottom + int(0.08 * H) + 1)
+        x_from, x_to = max(0, vx - 4), min(W, vx + int(0.10 * W))
+        for y in range(max(0, v_bottom - 2), y_end):
+            row = dark[y]
+            for s, e in _runs(row[x_from:]):
+                s, e = s + x_from, e + x_from
+                if s > x_to:
+                    break
+                if e - s + 1 >= max(kh, 3 * vw):
+                    rows = [y]
+                    while rows[-1] + 1 < H and dark[rows[-1] + 1, s:e + 1].mean() > 0.8:
+                        rows.append(rows[-1] + 1)
+                    if len(rows) > 15:
+                        break
+                    return dict(axis_left=vx, axis_w=vw, top=None, axis_y=(rows[0] + rows[-1]) / 2.0,
+                                axis_h=len(rows), right=e, x_start=s)
+        return None
+
     # ---- step 2-4: one panel -------------------------------------------- #
 
     def _build_panel(self, image, gray, dark, ink, ax, opts: ExtractOptions) -> Optional[Panel]:
@@ -453,14 +581,47 @@ class FigureExtractor:
 
         line_w = max(1, axis_h)
         x_lo = axis_left + axis_w
+        tick_rows = [t[0] for t in panel.ticks]
+
+        # Box plots first: boxes float above the axis, bars stand on it.
+        boxes = self._find_box_plot(image, gray, dark, ink, x_lo, right, top, axis_y, line_w, tick_rows)
+        # Small "boxes" in a bar chart are significance labels ("n.s." over a
+        # bracket) or filled-in scatter dots over the bars. Real box plots
+        # float, so they have no bars standing on the axis under them.
+        if boxes:
+            bars = self._find_bars(image, gray, dark, ink, x_lo, right, top, axis_y, line_w, tick_rows)
+            # a "bar" spanning most of the plot is a frame or shaded background
+            bars = [b for b in bars if b.x2 - b.x1 < 0.5 * (right - x_lo)]
+            # (a box low enough to be read as a "bar" is as wide as it; dots
+            # and labels are much narrower than the bar they sit on)
+            on_bars = bars and all(any(b.x1 - 3 <= (bx.x1 + bx.x2) / 2 <= b.x2 + 3
+                                       and bx.x2 - bx.x1 < 0.7 * (b.x2 - b.x1) for b in bars)
+                                   for bx in boxes)
+            if on_bars or (len(boxes) <= 2 and len(bars) > len(boxes)):
+                boxes = []
+        if boxes:
+            panel.kind, panel.boxes = "box", boxes
+            for b in boxes:
+                b.q1, b.median, b.q3 = (panel.value_at(b.q1_px), panel.value_at(b.median_px),
+                                        panel.value_at(b.q3_px))
+                b.lo, b.hi = panel.value_at(b.lo_px), panel.value_at(b.hi_px)
+                b.outliers = [panel.value_at(y) for y in b.outliers_px]
+                b.mean_marker = panel.value_at(b.mean_px)
+            if opts.bar_names:
+                self._read_bar_names(image, gray, panel, line_w)
+            if opts.titles:
+                panel.y_title = self._read_y_title(image, panel)
+            panel.y2 = int(min(H - 1, axis_y + 0.12 * H))
+            panel.x1 = int(max(0, axis_left - 0.12 * W))
+            return panel
+
         # Bars stand on zero. When the axis runs below zero, zero is a row
         # inside the plot: bars above it point up, bars below it point down.
         base_y = axis_y
         v_bottom = panel.value_at(axis_y)
-        if v_bottom < 0:
+        if panel.scale == "linear" and v_bottom < 0:
             # zero row, clamped to the plot (an all-negative axis has it at the top)
             base_y = float(min(axis_y, max(top, -panel.intercept / panel.slope)))
-        tick_rows = [t[0] for t in panel.ticks]
         panel.bars = []
         if base_y > top + 3 * line_w:
             panel.bars = self._find_bars(image, gray, dark, ink, x_lo, right, top, base_y, line_w, tick_rows)
@@ -541,14 +702,35 @@ class FigureExtractor:
 
         spacing = np.median(np.diff([t[0] for t in ticks])) if len(ticks) > 1 else 40
         half = int(max(8, min(0.45 * spacing, 30)))
-        pts = []
+        label_right = axis_left - tick_len - (2 if tick_len else 4)   # keep the axis line out
+        upright = []
         for ty, _ in ticks:
-            label_right = axis_left - tick_len - (2 if tick_len else 4)   # keep the axis line out
             crop, box = self._crop_label(image, dark, int(ty), half, label_right)
-            val, text = None, ""
+            text, val, score = ("", None, 0.0)
             if crop is not None:
-                text, _ = self.ocr.line(crop)
-                val = parse_number(text)
+                text, val, score = self._read_tick_label(crop)
+            upright.append((ty, text, val, score, box))
+        readings = upright
+        # Some styles (R base graphics) write y labels parallel to the axis:
+        # the characters stack vertically. Read those columns rotated and keep
+        # whichever orientation the whole axis reads better in.
+        n_up = sum(r[2] is not None for r in upright)
+        rotated = self._read_rotated_labels(image, ticks, label_right, spacing)
+        if rotated:
+            n_rot = sum(r[2] is not None for r in rotated)
+
+            def digits(rs):
+                return float(np.mean([sum(ch.isdigit() for ch in r[1]) for r in rs if r[2] is not None] or [0]))
+            # an upright read of a vertical label catches one glyph ("8." for
+            # "0.8"): the rotated read wins when it parses as many labels and
+            # captures more of each, or reads them more confidently
+            if n_rot > n_up or (n_rot == n_up and n_rot > 0 and (
+                    digits(rotated) > digits(upright) + 0.3 or
+                    np.mean([r[3] for r in rotated]) > np.mean([r[3] for r in upright]) + 0.05)):
+                readings = rotated
+        pts = []
+        for ty, text, val, _, box in readings:
+            if box:
                 panel.label_left = min(panel.label_left or box[0], box[0])
             panel.ticks.append((ty, val, text))
             if val is not None:
@@ -558,9 +740,79 @@ class FigureExtractor:
             a, b, n = None, None, 0
         if a is not None and n < max(2, int(np.ceil(0.4 * len(ticks)))):
             a, b, n = None, None, 0      # too few labels agree: likely not an axis
+        # Log axes (1, 10, 100 or 200, 400, 800): labels are linear in log10.
+        # Only a last resort: when no linear calibration works and the log
+        # one explains nearly all labels (a misread linear axis can fit three).
+        pos = [(y, v) for y, v in pts if v > 0]
+        if a is None and len(pos) >= 3:
+            la, lb, ln = robust_linear_fit([(y, float(np.log10(v))) for y, v in pos])
+            if la is not None and la < 0 and ln >= max(3, len(pos) - 1):
+                a, b, n = la, lb, ln
+                panel.scale = "log"
         panel.slope, panel.intercept, panel.calibration_inliers = a, b, n
         if n and n < len(ticks):
             panel.warnings.append(f"{len(ticks) - n} of {len(ticks)} tick labels ignored as misreads")
+
+    def _read_tick_label(self, crop) -> Tuple[str, Optional[float], float]:
+        """Read one upright tick label: (text, value or None, confidence)."""
+        text, score = self.ocr.line(crop)
+        val = parse_number(text)
+        return text, val, (score if val is not None else 0.0)
+
+    def _read_rotated_labels(self, image, ticks, label_right, spacing) -> list:
+        """
+        Labels written along the axis: crop the column of glyphs centred on
+        each tick and read it turned upright. Both turn directions are tried
+        on the axis as a whole (R reads bottom-to-top, others top-to-bottom).
+        """
+        H = image.shape[0]
+        reach = int(max(12, min(0.48 * spacing, 60)))
+        crops = []
+        for ty, _ in ticks:
+            y1, y2 = int(max(0, ty - reach)), int(min(H, ty + reach + 1))
+            x0 = max(0, label_right - 60)
+            if label_right - x0 < 4 or y2 - y1 < 6:
+                crops.append((ty, None, None))
+                continue
+            text = cv2.cvtColor(image[y1:y2, x0:label_right], cv2.COLOR_BGR2GRAY) < TEXT_THRESHOLD
+            cols = np.where(text.any(axis=0))[0]
+            if cols.size == 0:
+                crops.append((ty, None, None))
+                continue
+            # the glyph column nearest the axis
+            groups = _runs(text.any(axis=0))
+            gx1, gx2 = groups[-1]
+            if gx2 - gx1 > 0.6 * reach:
+                crops.append((ty, None, None))
+                continue
+            rows = np.where(text[:, gx1:gx2 + 1].any(axis=1))[0]
+            if rows.size == 0:
+                crops.append((ty, None, None))
+                continue
+            ry1, ry2 = y1 + rows[0], y1 + rows[-1]
+            # vertical text: taller than wide, centred on its tick
+            if ry2 - ry1 < 1.3 * (gx2 - gx1 + 1) or abs((ry1 + ry2) / 2 - ty) > 0.35 * reach + 3:
+                crops.append((ty, None, None))
+                continue
+            pad = 3
+            crop = image[max(0, ry1 - pad): ry2 + pad + 1, max(0, x0 + gx1 - pad): x0 + gx2 + pad + 1]
+            crops.append((ty, crop, (x0 + gx1, ry1, x0 + gx2, ry2)))
+        if sum(c[1] is not None for c in crops) < 2:
+            return []
+        best = None
+        for rot in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
+            out = []
+            for ty, crop, box in crops:
+                if crop is None:
+                    out.append((ty, "", None, 0.0, None))
+                    continue
+                text, score = self.ocr.line(cv2.rotate(crop, rot))
+                val = parse_number(text)
+                out.append((ty, text, val, score if val is not None else 0.0, box))
+            total = sum(r[3] for r in out)
+            if best is None or total > best[0]:
+                best = (total, out)
+        return best[1]
 
     @staticmethod
     def _label_rows_as_ticks(image, axis_left, top, axis_row, line_w) -> List[Tuple[float, int]]:
@@ -629,6 +881,132 @@ class FigureExtractor:
         return crop, (gx1, gy1, gx2, gy2)
 
     @staticmethod
+    def _split_touching_bars(image, dark, run, s, e, x_lo, y_lo, axis_row, line_w) -> List[Tuple[int, int]]:
+        """
+        Split a run of foreground columns into the bars it is made of when
+        grouped bars are drawn edge to edge.
+
+        Columns are segmented into runs of steady fill colour (per-column
+        median over the lower part of the bars, which scatter dots barely
+        move) and of steady height (median-filtered, so a whisker or a dot on
+        top doesn't count). Transitions 1–3 px wide (outlines, anti-aliasing)
+        become boundaries. Pieces are kept only if neighbours differ in fill
+        or are separated by an outline, and all pieces share one width.
+        """
+        w = e - s + 1
+        if w < 12:
+            return [(s, e)]
+        min_piece = max(5, 2 * line_w + 3)
+
+        def runs_of(values, close):
+            """[(start, end)] of consecutive columns similar to the run so far."""
+            out, start, acc = [], 0, [values[0]]
+            for i in range(1, len(values)):
+                ref = np.median(np.array(acc[-6:]), axis=0)
+                if close(values[i], ref):
+                    acc.append(values[i])
+                    continue
+                out.append((start, i - 1))
+                start, acc = i, [values[i]]
+            out.append((start, len(values) - 1))
+            return out
+
+        def boundaries(runs):
+            """Cut positions between the long runs; short runs are transitions."""
+            longs = [r for r in runs if r[1] - r[0] + 1 >= min_piece]
+            cuts = []
+            for (a0, a1), (b0, b1) in zip(longs, longs[1:]):
+                cuts.append((a1 + b0 + 1) // 2)
+            return cuts
+
+        color_cuts, height_cuts = set(), set()
+        # fill colour runs
+        y2 = axis_row - line_w - 2
+        mn = float(np.min(run[s:e + 1]))
+        y1 = max(0, y2 - max(6, int(0.6 * mn)))
+        if y2 - y1 >= 4:
+            band = image[y1:y2, x_lo + s: x_lo + e + 1]
+            lab = np.median(cv2.cvtColor(band, cv2.COLOR_BGR2LAB).astype(float), axis=0)
+            color_cuts.update(boundaries(runs_of(list(lab), lambda v, r: np.linalg.norm(v - r) <= 25)))
+        # height runs (the median filter removes whisker/dot spikes up to
+        # about min_piece wide; steps between bars survive it)
+        k = 2 * min_piece + 1
+        pad = np.pad(run[s:e + 1].astype(float), k // 2, mode="edge")
+        prof = np.array([np.median(pad[i:i + k]) for i in range(w)])
+        step = max(4, 2 * line_w + 2)
+        height_cuts.update(boundaries(runs_of(list(prof), lambda v, r: abs(v - r) < step)))
+
+        # Keep a boundary only where neighbouring bars really differ: their
+        # fill colours (one per series), or a dark outline running up between
+        # them. Two halves of one white bar with dots on it share a fill.
+        def fill(a, b):
+            ya = axis_row - max(4, int(0.6 * float(np.min(run[a:b + 1]))))
+            block = image[max(0, ya):axis_row - line_w - 2, x_lo + a + 2: x_lo + b - 1]
+            if block.size == 0:
+                return None
+            return np.median(cv2.cvtColor(block, cv2.COLOR_BGR2LAB).reshape(-1, 3).astype(float), axis=0)
+
+        def outline_between(a_end, b_start):
+            lo = max(s, a_end - 3)
+            hi = min(e, b_start + 3)
+            ya = axis_row - int(0.8 * float(np.min(run[lo:hi + 1])))
+            yb = axis_row - line_w - 3
+            if yb - ya < 6:
+                return False
+            cols = dark[ya:yb, x_lo + lo: x_lo + hi + 1].mean(axis=0)
+            if not cols.size or cols.max() <= 0.92:
+                return False
+            # an outline is darker than the fills beside it (in a dark-filled
+            # bar every column is "dark")
+            inner = dark[ya:yb, x_lo + max(s, a_end - 12): x_lo + max(s + 1, a_end - 3)].mean()
+            inner2 = dark[ya:yb, x_lo + min(e - 1, b_start + 4): x_lo + min(e, b_start + 12)].mean()
+            return inner < 0.5 and inner2 < 0.5
+
+        def pieces_from(cuts):
+            pieces, prev = [], 0
+            for c in sorted(cuts):
+                if c - prev >= min_piece:
+                    pieces.append((s + prev, s + c - 1))
+                    prev = c
+            if w - prev >= min_piece:
+                pieces.append((s + prev, e))
+            elif pieces:
+                pieces[-1] = (pieces[-1][0], e)
+            if len(pieces) < 2:
+                return None
+            merged = [pieces[0]]
+            for a, b in pieces[1:]:
+                pa, pb = merged[-1], (a, b)
+                fa, fb = fill(*pa), fill(*pb)
+                differs = fa is not None and fb is not None and np.linalg.norm(fa - fb) > 30
+                if differs or outline_between(pa[1], pb[0]):
+                    merged.append(pb)
+                else:
+                    merged[-1] = (pa[0], b)
+            # Bars in a group are drawn at one width; uneven pieces mean the
+            # cuts came from dots or whiskers, not from neighbouring bars.
+            widths = [b - a + 1 for a, b in merged]
+            if len(merged) < 2 or max(widths) > 1.35 * min(widths):
+                return None
+            return merged
+
+        # One stray cut (a whisker wider than the filter, a dot) spoils the
+        # combined set, so fall back to each kind of evidence on its own.
+        for cuts in (color_cuts | height_cuts, color_cuts, height_cuts):
+            pieces = pieces_from(cuts) if cuts else None
+            if pieces:
+                return pieces
+        return [(s, e)]
+
+    def _find_box_plot(self, image, gray, dark, ink, x_lo, x_hi, top, axis_y, line_w, tick_rows) -> List[Box]:
+        y_lo, y_hi = max(0, top), int(round(axis_y)) + 1
+        region_ink = ink[y_lo:y_hi, x_lo:x_hi + 1]
+        if region_ink.size == 0:
+            return []
+        fg = plot_foreground(gray, region_ink, y_lo, y_hi, x_lo, x_hi, line_w, tick_rows)
+        return find_boxes(image, gray, dark, ink, fg, x_lo, y_lo, axis_y, line_w)
+
+    @staticmethod
     def _stacked(image, bars: List[Bar], axis_y: float, line_w: int) -> bool:
         """True when most bars are built from 3+ distinct colour bands (a stacked chart)."""
         stacked = 0
@@ -691,43 +1069,7 @@ class FigureExtractor:
         region_ink = ink[y_lo:y_hi, x_lo:x_hi + 1]
         if region_ink.size == 0:
             return []
-        # Light gridlines would cut the background into enclosed strips that
-        # look like bar interior. A gridline is a thin row band where light
-        # ink covers a large share of the width (it shows between the bars);
-        # light-filled bars make thick bands instead, so they are kept.
-        region_gray = gray[y_lo:y_hi, x_lo:x_hi + 1]
-        # only vertically thin light ink can be a gridline; bar fill is tall
-        tall = cv2.morphologyEx(region_ink, cv2.MORPH_OPEN,
-                                cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))).astype(bool)
-        light = (region_gray > 140) & (region_ink == 1) & ~tall
-        frac = light.mean(axis=1)
-        keep_bottom = region_ink.shape[0] - (2 * line_w + 3)     # x-axis region stays
-        region_ink = region_ink.copy()
-        for s, e in _runs(frac >= 0.25):
-            if e - s + 1 <= 3 and e < keep_bottom:
-                region_ink[s:e + 1][light[s:e + 1]] = 0
-        # Gridlines sit on the tick rows and leave the y-axis: with only a
-        # couple of wide bars little of them shows, so check those rows directly.
-        for ty in grid_rows or []:
-            r = int(round(ty)) - y_lo
-            if 2 <= r < keep_bottom:
-                band = slice(r - 2, r + 3)
-                if light[band, :8].any(axis=0).mean() > 0.6:
-                    region_ink[band][light[band]] = 0
-        # Background = white area connected to the top of the plot. Anything
-        # enclosed (white bar interiors, hollow dots) counts as foreground.
-        bg = (1 - region_ink).astype(np.uint8)
-        n, labels = cv2.connectedComponents(bg, connectivity=4)
-        # seed from the top few rows (a boxed plot's frame line covers row 0)
-        # plus the largest white region, which is the plot's open background
-        seed_rows = labels[: min(labels.shape[0], 2 * line_w + 4), :]
-        outside_labels = set(np.unique(seed_rows)) - {0}
-        if n > 1:
-            areas = np.bincount(labels[bg == 1].ravel(), minlength=n)
-            areas[0] = 0
-            outside_labels.add(int(np.argmax(areas)))
-        outside = np.isin(labels, list(outside_labels)) & (bg == 1)
-        fg = ~outside
+        fg = plot_foreground(gray, region_ink, y_lo, y_hi, x_lo, x_hi, line_w, grid_rows)
         h = fg.shape[0]
 
         # Column profile: unbroken foreground height standing on the x-axis.
@@ -740,6 +1082,10 @@ class FigureExtractor:
         segs = [(s, e) for s, e in _runs(run >= min_h) if e - s + 1 >= 6]
         if not segs:
             return []
+        # Grouped bars are often drawn edge to edge: split where neighbouring
+        # bars meet (a step in height, a change of fill colour, or an outline).
+        segs = [piece for s, e in segs
+                for piece in self._split_touching_bars(image, dark, run, s, e, x_lo, y_lo, axis_row, line_w)]
         widths = np.array([e - s + 1 for s, e in segs])
         typical = np.median(widths[widths >= np.percentile(widths, 50)])
         segs = [(s, e) for s, e in segs if (e - s + 1) >= 0.45 * typical]
@@ -1039,9 +1385,9 @@ class FigureExtractor:
         for y in range(best_end, bar_top_y + 1):
             row = dark[y]
             l = r = best_col
-            while l > x1 - 2 and row[l - 1]:
+            while l > max(x1 - 2, 0) and row[l - 1]:
                 l -= 1
-            while r < x2 + 2 and row[r + 1]:
+            while r < min(x2 + 2, row.size - 1) and row[r + 1]:
                 r += 1
             length = r - l + 1
             symmetric = abs((l + r) / 2 - best_col) <= max(2, 0.06 * w)
@@ -1146,7 +1492,7 @@ class FigureExtractor:
         bracket ("Res", "Sus") becomes a prefix for the bars under it.
         """
         H, W = gray.shape
-        bars = panel.bars
+        bars = panel.items
         centers = np.array([(b.x1 + b.x2) / 2 for b in bars])
         pitch = float(np.median(np.diff(centers))) if len(bars) > 1 else 2.0 * (bars[0].x2 - bars[0].x1)
         x0 = int(max(0, centers[0] - pitch / 2))

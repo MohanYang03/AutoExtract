@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "backend"))
 sys.path.insert(0, HERE)
 
 import extract_routes  # noqa: E402
-from synth import ChartSpec, render  # noqa: E402
+from synth import BoxSpec, ChartSpec, render, render_box  # noqa: E402
 
 SPEC = ChartSpec([12.0, 31.5, 22.0], [1.5, 3.0, 2.2], labels=["Control", "CUMS", "CUMS+EA"])
 
@@ -123,7 +123,7 @@ def test_export_roundtrip(client):
     r = client.post("/api/export", json={"figures": [fig], "filename": "x.xlsx"})
     assert r.status_code == 200
     wb = openpyxl.load_workbook(io.BytesIO(r.data))
-    assert wb.sheetnames[:2] == ["Summary", "All bars"]
+    assert wb.sheetnames[:2] == ["Summary", "All data"]
     ws = wb[wb.sheetnames[2]]
     header = [c.value for c in ws[1]][:12]
     assert header[0] == "mean" and header[-1] == "mean+sd" and header[5] == "treatment_group"
@@ -133,6 +133,32 @@ def test_export_roundtrip(client):
     assert isinstance(row[1], float) and abs(row[1] - 1.5) < 0.5       # sd = measured error
     assert str(row[10]).startswith("=")                              # sem derived by formula
     assert abs(row[11] - (row[0] + row[1])) < 1e-9
+
+
+def test_box_plot_extract_and_export(client):
+    """A box plot comes back as kind "box"; the export estimates mean/SD with live formulas."""
+    stats = [(2, 5, 7, 9, 13), (4, 8, 11, 15, 19)]
+    ok, buf = cv2.imencode(".png", render_box(BoxSpec(stats, ylim=(0, 20))))
+    data = _post(client, buf.tobytes(), "box.png").get_json()
+    panel = data["figures"][0]["panels"][0]
+    assert panel["kind"] == "box" and len(panel["boxes"]) == 2
+    assert abs(panel["boxes"][0]["median"] - 7) < 0.2
+    panel["boxes"][0]["n"] = 12
+    panel["whisker_type"] = "tukey"
+    panel["mean_method"] = "not a method"          # falls back to the default
+    r = client.post("/api/export", json={"figures": data["figures"]})
+    assert r.status_code == 200
+    wb = openpyxl.load_workbook(io.BytesIO(r.data))
+    ws = wb[wb.sheetnames[2]]
+    header = [c.value for c in ws[1]]
+    assert header[11] == "mean+sd" and header[14:19] == ["min", "Q1", "median", "Q3", "max"]
+    row = [c.value for c in ws[2]]
+    assert row[6] == 12
+    assert str(row[0]).startswith('=IF(G2="","",') and "NORMSINV" in str(row[1])
+    assert abs(row[16] - 7) < 0.2 and row[19] == "tukey" and row[20] == "luo"
+    assert [c.value for c in wb["Summary"][2]][4] == "box"
+    combined = [c.value for c in wb["All data"][1]]
+    assert combined[-8:-3] == ["min", "Q1", "median", "Q3", "max"]
 
 
 def test_export_excluded_and_empty(client):
@@ -148,6 +174,8 @@ def test_export_excluded_and_empty(client):
     {"figures": [{"panels": ["not a panel"]}]},
     {"figures": [{"panels": [{"bars": [{"x1": 0, "x2": 1, "top_px": 1, "cap_px": 1, "mean": 1.0, "n": "eight"}]}]}]},
     {"figures": "nope"},
+    {"figures": [{"panels": [{"kind": "box", "boxes": [{"x1": 0, "x2": 1, "q1_px": 1, "median_px": 1, "q3_px": 1,
+                                                         "lo_px": 1, "hi_px": 1, "median": "x"}]}]}]},
 ])
 def test_export_rejects_malformed(client, bad):
     r = client.post("/api/export", json=bad)

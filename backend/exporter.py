@@ -6,6 +6,10 @@ Long_format_*.xlsx files exactly, so rows can be pasted straight across.
 `sd` is a live formula (sem * sqrt(sample_size)) that fills in once the
 sample size is typed in. Bars whose error bar could not be confirmed are
 highlighted for a quick manual check.
+
+Box plots fill the same columns with an estimated mean and SD: live
+formulas on the five-number summary (written next to them) and the sample
+size, using the method chosen for the panel (see estimators.py).
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from estimators import skewness_warning
 from figure_extractor import Panel
 
 LONG_COLUMNS = ["mean", "sd", "age(week)", "sex(male)", "acupoint", "treatment_group",
@@ -65,9 +70,92 @@ def _sheet_title(base: str, used: set) -> str:
     return candidate
 
 
+BOX_COLUMNS = ["min", "Q1", "median", "Q3", "max", "whiskers", "mean method", "sd method"]
+
+
 def long_header(error_type: str) -> List[str]:
     """LONG_COLUMNS with the last column named after what the error bars show."""
     return LONG_COLUMNS[:-1] + ["mean+sd" if error_type == "sd" else "mean+sem"]
+
+
+def box_formulas(a: str, q1: str, m: str, q3: str, b: str, n: str,
+                 whisker_type: str, mean_method: str, sd_method: str):
+    """
+    Excel formulas (without "=") for the estimated mean and SD, mirroring
+    estimators.estimate. Arguments are cell references. When the whiskers
+    are the range the five-number estimators are used (S2), otherwise the
+    quartile ones (S3).
+    """
+    xi = f"(2*NORMSINV(({n}-0.375)/({n}+0.25)))"
+    eta = f"(2*NORMSINV((0.75*{n}-0.125)/({n}+0.25)))"
+    if whisker_type == "minmax":
+        if mean_method == "wan":
+            mean = f"({a}+2*{q1}+2*{m}+2*{q3}+{b})/8"
+        elif mean_method == "hozo":
+            mean = f"({a}+2*{m}+{b})/4"
+        else:
+            w1 = f"(2.2/(2.2+{n}^0.75))"
+            w2 = f"(0.7-0.72/{n}^0.55)"
+            mean = f"{w1}*({a}+{b})/2+{w2}*({q1}+{q3})/2+(1-{w1}-{w2})*{m}"
+        if sd_method == "wan":
+            sd = f"0.5*(({b}-{a})/{xi}+({q3}-{q1})/{eta})"
+        elif sd_method == "hozo":
+            sd = (f"IF({n}<=15,SQRT((({a}-2*{m}+{b})^2/4+({b}-{a})^2)/12),"
+                  f"IF({n}<=70,({b}-{a})/4,({b}-{a})/6))")
+        else:
+            w = f"(1/(1+0.07*{n}^0.6))"
+            sd = f"{w}*({b}-{a})/{xi}+(1-{w})*({q3}-{q1})/{eta}"
+    else:
+        if mean_method in ("wan", "hozo"):
+            mean = f"({q1}+{m}+{q3})/3"
+        else:
+            w = f"(0.7+0.39/{n})"
+            mean = f"{w}*({q1}+{q3})/2+(1-{w})*{m}"
+        sd = f"({q3}-{q1})/{eta}"
+    return mean, sd
+
+
+def _write_box_rows(ws, start_row: int, result: PanelResult, first_col: int, stat_col: int) -> int:
+    """
+    One row per box: estimated mean/SD (formulas on n) in the long-format
+    columns, and the five-number summary from `stat_col` on.
+    """
+    p = result.panel
+    col = {name: first_col + i for i, name in enumerate(LONG_COLUMNS)}
+    r = start_row
+    for bx in p.boxes:
+        refs = [f"{get_column_letter(stat_col + i)}{r}" for i in range(5)]
+        n_ref = f"{get_column_letter(col['sample_size'])}{r}"
+        mean_ref = f"{get_column_letter(col['mean'])}{r}"
+        sd_ref = f"{get_column_letter(col['sd'])}{r}"
+        five = [bx.lo, bx.q1, bx.median, bx.q3, bx.hi]
+        for i, v in enumerate(five + [p.whisker_type, p.mean_method, p.sd_method]):
+            ws.cell(r, stat_col + i, v)
+        if None not in five:
+            mean_f, sd_f = box_formulas(*refs, n_ref, p.whisker_type, p.mean_method, p.sd_method)
+            ws.cell(r, col["mean"], f'=IF({n_ref}="","",{mean_f})')
+            ws.cell(r, col["sd"], f'=IF({n_ref}="","",{sd_f})')
+            ws.cell(r, col["sem"], f'=IF({n_ref}="","",{sd_ref}/SQRT({n_ref}))')
+            ws.cell(r, col["mean+sem"], f'=IF({n_ref}="","",{mean_ref}+{sd_ref})')
+        ws.cell(r, col["treatment_group"], bx.label)
+        if bx.n:
+            ws.cell(r, col["sample_size"], bx.n)
+        if result.paper_id is not None:
+            ws.cell(r, col["paper_id"], result.paper_id)
+        if bx.uncertain:
+            for c in range(first_col, first_col + len(LONG_COLUMNS)):
+                ws.cell(r, c).fill = FLAG_FILL
+        r += 1
+    return r
+
+
+def _box_check(bx) -> str:
+    notes = []
+    if bx.uncertain:
+        notes.append(bx.note or "check box")
+    if None not in (bx.q1, bx.median, bx.q3) and skewness_warning(bx.q1, bx.median, bx.q3):
+        notes.append("skewed: estimate may be biased")
+    return "; ".join(notes)
 
 
 def _write_long_rows(ws, start_row: int, result: PanelResult, first_col: int = 1) -> int:
@@ -112,47 +200,61 @@ def build_workbook(results: List[PanelResult]) -> Workbook:
     wb = Workbook()
     summary = wb.active
     summary.title = "Summary"
-    summary.append(["source", "figure", "panel", "y-axis title", "chart", "error bars", "bars",
-                    "ticks used", "flagged bars", "warnings", "sheet"])
+    summary.append(["source", "figure", "panel", "y-axis title", "chart", "error bars", "groups",
+                    "ticks used", "flagged", "warnings", "sheet"])
     for c in summary[1]:
         c.font = HEADER_FONT
 
-    # One combined sheet: context columns, then the 12 long-format columns.
-    # Panels may mix SEM and SD, so the last column is "mean+error" here.
-    combined = wb.create_sheet("All bars")
+    # One combined sheet: context columns, then the 12 long-format columns,
+    # then the box-plot statistics (box rows only). Panels may mix SEM, SD
+    # and box estimates, so the last long column is "mean+error" here.
+    combined = wb.create_sheet("All data")
     combined.append(["source", "figure", "panel", "y-axis title", "error bars", "check"]
-                    + LONG_COLUMNS[:-1] + ["mean+error"])
+                    + LONG_COLUMNS[:-1] + ["mean+error"] + BOX_COLUMNS)
     for c in combined[1]:
         c.font = HEADER_FONT
+    combined_stats = 7 + len(LONG_COLUMNS)
 
-    used = {"Summary", "All bars"}
+    used = {"Summary", "All data"}
     next_combined = 2
     for res in results:
         p = res.panel
+        is_box = p.kind == "box"
         title = _sheet_title(f"{res.name} {p.y_title}".strip(), used)
         ws = wb.create_sheet(title)
-        ws.append(long_header(p.error_type) + ["", "check"])
+        check_col = len(LONG_COLUMNS) + 2
+        if is_box:
+            ws.append(long_header("sd") + ["", "check"] + BOX_COLUMNS)
+            _write_box_rows(ws, 2, res, 1, check_col + 1)
+            checks = [_box_check(bx) for bx in p.boxes]
+        else:
+            ws.append(long_header(p.error_type) + ["", "check"])
+            _write_long_rows(ws, 2, res)
+            checks = ["check error bar" if bar.uncertain else "" for bar in p.bars]
         for c in ws[1]:
             c.font = HEADER_FONT
-        _write_long_rows(ws, 2, res)
-        for i, bar in enumerate(p.bars):
-            if bar.uncertain:
-                ws.cell(2 + i, len(LONG_COLUMNS) + 2, "check error bar")
+        for i, note in enumerate(checks):
+            if note:
+                ws.cell(2 + i, check_col, note)
         ws.column_dimensions["F"].width = 28
 
-        for i, bar in enumerate(p.bars):
+        error_label = "box (estimated)" if is_box else p.error_type.upper()
+        for i, note in enumerate(checks):
             row = next_combined + i
             combined.cell(row, 1, res.source)
             combined.cell(row, 2, res.figure)
             combined.cell(row, 3, p.letter)
             combined.cell(row, 4, p.y_title)
-            combined.cell(row, 5, p.error_type.upper())
-            combined.cell(row, 6, "check error bar" if bar.uncertain else "")
-        next_combined = _write_long_rows(combined, next_combined, res, first_col=7)
+            combined.cell(row, 5, error_label)
+            combined.cell(row, 6, note)
+        if is_box:
+            next_combined = _write_box_rows(combined, next_combined, res, 7, combined_stats)
+        else:
+            next_combined = _write_long_rows(combined, next_combined, res, first_col=7)
 
-        summary.append([res.source, res.figure, p.letter, p.y_title, p.kind, p.error_type.upper(),
-                        len(p.bars), f"{p.calibration_inliers}/{len(p.ticks)}",
-                        sum(b.uncertain for b in p.bars), "; ".join(p.warnings), title])
+        summary.append([res.source, res.figure, p.letter, p.y_title, p.kind, error_label,
+                        len(p.items), f"{p.calibration_inliers}/{len(p.ticks)}",
+                        sum(1 for note in checks if note), "; ".join(p.warnings), title])
 
     for ws in (summary, combined):
         for col in range(1, ws.max_column + 1):
@@ -170,6 +272,18 @@ def draw_overlay(image: np.ndarray, panels: List[Panel]) -> np.ndarray:
         for ty, val, _ in p.ticks:
             color = (0, 170, 0) if val is not None else (0, 0, 255)
             cv2.circle(out, (int(p.axis_x) + 8, int(ty)), 4, color, -1)
+        for b in p.boxes:
+            colour = (0, 0, 255) if b.uncertain else orange
+            cx = (b.x1 + b.x2) // 2
+            cv2.rectangle(out, (b.x1, int(round(b.q3_px))), (b.x2, int(round(b.q1_px))), colour, 2)
+            cv2.line(out, (b.x1, int(round(b.median_px))), (b.x2, int(round(b.median_px))), blue, 3)
+            for y_end, y_box in ((b.hi_px, b.q3_px), (b.lo_px, b.q1_px)):
+                cv2.line(out, (cx, int(round(y_box))), (cx, int(round(y_end))), colour, 1)
+                cv2.line(out, (cx - 8, int(round(y_end))), (cx + 8, int(round(y_end))), colour, 2)
+            if b.mean_px is not None:
+                cv2.drawMarker(out, (cx, int(round(b.mean_px))), (0, 160, 0), cv2.MARKER_CROSS, 12, 2)
+            for y in b.outliers_px:
+                cv2.circle(out, (cx, int(round(y))), 4, magenta, 1)
         for i, b in enumerate(p.bars, 1):
             if p.kind == "dot":
                 cv2.line(out, (b.x1, int(round(b.top_px))), (b.x2, int(round(b.top_px))), orange, 3)

@@ -1,14 +1,15 @@
 /**
  * BatchExtractor Component
  *
- * Drop in papers (PDF) or figure images; every bar chart and dot plot is
- * measured automatically. Review and adjust each panel, then download one
+ * Drop in papers (PDF) or figure images; every bar chart, dot plot and box
+ * plot is measured automatically. Review and adjust each panel, then download one
  * workbook in the meta-analysis long format or copy rows to the clipboard.
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { downloadWorkbook, extractFile } from '../services/extractService';
-import { panelToTSV, withValues } from '../utils/panelMath';
+import { boxWithValues, panelItems, panelToTSV, withValues } from '../utils/panelMath';
+import BoxPanelEditor from './BoxPanelEditor';
 import PanelEditor from './PanelEditor';
 
 const ACCEPT = '.pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp';
@@ -73,7 +74,7 @@ const BatchExtractor = () => {
                 setJob(data.job);
                 setSeconds((s) => s + (data.seconds || 0));
                 if (!data.figures.length) {
-                    setErrors((e) => [...e, `${file.name}: no bar charts or dot plots found`]);
+                    setErrors((e) => [...e, `${file.name}: no bar charts, dot plots or box plots found`]);
                 }
                 setFigures((prev) => [...prev, ...data.figures]);
             } catch (err) {
@@ -89,6 +90,16 @@ const BatchExtractor = () => {
             const panels = fig.panels.map((p, i) => {
                 if (i !== panelIdx) return p;
                 if (change.type === 'panel') return { ...p, ...change.patch };
+                if (change.type === 'box') {
+                    const boxes = p.boxes.map((b, j) => {
+                        if (j !== change.index) return b;
+                        const next = { ...b, ...change.patch };
+                        const moved = Object.keys(change.patch).some((k) => k.endsWith('_px'));
+                        if (moved) next.uncertain = false;
+                        return moved ? boxWithValues(p, next) : next;
+                    });
+                    return { ...p, boxes };
+                }
                 const bars = p.bars.map((b, j) => {
                     if (j !== change.index) return b;
                     const next = { ...b, ...change.patch };
@@ -123,8 +134,9 @@ const BatchExtractor = () => {
         () => figures.flatMap((f) => f.panels.filter((p) => !p.excluded).map((p) => ({ f, p }))),
         [figures],
     );
-    const nBars = included.reduce((n, { p }) => n + p.bars.length, 0);
-    const nFlagged = included.reduce((n, { p }) => n + p.bars.filter((b) => b.uncertain).length, 0);
+    const nBars = included.reduce((n, { p }) => n + (p.kind === 'box' ? 0 : p.bars.length), 0);
+    const nBoxes = included.reduce((n, { p }) => n + (p.kind === 'box' ? p.boxes.length : 0), 0);
+    const nFlagged = included.reduce((n, { p }) => n + panelItems(p).filter((b) => b.uncertain).length, 0);
 
     const copyAll = async () => {
         const text = included.map(({ f, p }) => panelToTSV(p, f.paper_id)).join('\n');
@@ -157,8 +169,8 @@ const BatchExtractor = () => {
             <div className="mb-3">
                 <h1 className="mb-1">Batch Extract</h1>
                 <p className="text-muted mb-0">
-                    Drop papers (PDF) or figure images. Every bar chart and dot plot is measured automatically:
-                    the axis is calibrated from all tick labels, and bars and error bars are read from the pixels.
+                    Drop papers (PDF) or figure images. Every bar chart, dot plot and box plot is measured automatically:
+                    the axis is calibrated from all tick labels, and bars, error bars and box quartiles are read from the pixels.
                 </p>
             </div>
 
@@ -226,7 +238,7 @@ const BatchExtractor = () => {
                 <div className="results-toolbar d-flex flex-wrap align-items-center gap-2 mb-3 p-2 rounded shadow-sm">
                     <span className="small">
                         <strong>{Object.keys(bySource).length}</strong> files · <strong>{included.length}</strong> panels ·{' '}
-                        <strong>{nBars}</strong> bars
+                        <strong>{nBars}</strong> bars{nBoxes > 0 && <> · <strong>{nBoxes}</strong> boxes</>}
                         {nFlagged > 0 && <> · <span className="text-warning-emphasis fw-bold">{nFlagged} to check</span></>}
                         {seconds > 0 && <span className="text-muted"> · {seconds.toFixed(1)} s</span>}
                     </span>
@@ -258,14 +270,21 @@ const BatchExtractor = () => {
                 <div key={source} className="mb-4">
                     <h5 className="mb-2"><i className="bi bi-file-earmark-pdf me-2"></i>{source}</h5>
                     {figs.map((fig) => fig.panels.map((panel, pi) => (
-                        (!flaggedOnly || panel.bars.some((b) => b.uncertain)) && (
+                        (!flaggedOnly || panelItems(panel).some((b) => b.uncertain)) && (panel.kind === 'box' ? (
+                            <BoxPanelEditor
+                                key={`${fig.id}-${pi}`}
+                                figure={fig}
+                                panel={panel}
+                                onChange={(change) => updatePanel(fig.id, pi, change)}
+                            />
+                        ) : (
                             <PanelEditor
                                 key={`${fig.id}-${pi}`}
                                 figure={fig}
                                 panel={panel}
                                 onChange={(change) => updatePanel(fig.id, pi, change)}
                             />
-                        )
+                        ))
                     )))}
                 </div>
             ))}

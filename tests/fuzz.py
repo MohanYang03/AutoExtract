@@ -1,11 +1,11 @@
 """
 Randomised stress test: many synthetic charts with random values and styles.
 
-    .venv/Scripts/python tests/fuzz.py [N] [--seed S] [--show-failures DIR]
+    .venv/Scripts/python tests/fuzz.py [N] [--seed S] [--show-failures DIR] [--box]
 
 Reports detection rate and error distribution; failures can be saved as
 images for inspection. Exit code 1 if fewer than 95% of charts are measured
-with every mean within 1% of the axis range.
+with every mean within 1% of the axis range (--box: every box statistic).
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "backend"))
 sys.path.insert(0, HERE)
 
 from figure_extractor import ExtractOptions, FigureExtractor  # noqa: E402
-from synth import ChartSpec, render  # noqa: E402
+from synth import BoxSpec, ChartSpec, render, render_box  # noqa: E402
 
 PALETTES = [
     None,
@@ -61,15 +61,79 @@ def random_spec(rng: np.random.Generator) -> ChartSpec:
     )
 
 
+def random_box_spec(rng: np.random.Generator) -> BoxSpec:
+    n = int(rng.integers(1, 7))
+    scale = float(10.0 ** rng.integers(-1, 4))
+    stats = []
+    for _ in range(n):
+        q = np.sort(rng.uniform(0.05, 0.95, 5)) * scale
+        # keep the box and whiskers at least a few pixels apart
+        if min(np.diff(q)) < 0.03 * scale:
+            q = np.linspace(0.1, 0.9, 5) * scale * rng.uniform(0.6, 1.0)
+        stats.append(tuple(float(v) for v in q))
+    pal = PALETTES[int(rng.integers(0, len(PALETTES)))]
+    colors = None if pal is None else [pal[i % len(pal)] for i in range(n)]
+    outliers = None
+    if rng.random() < 0.3:
+        outliers = [[s[4] + 0.04 * scale] if rng.random() < 0.5 else [] for s in stats]
+    return BoxSpec(
+        stats=stats, colors=colors, outliers=outliers, ylim=(0, scale),
+        linewidth=float(rng.choice([0.8, 1.2, 1.8])), caps=bool(rng.random() < 0.8),
+        dashed=bool(rng.random() < 0.15), grid=bool(rng.random() < 0.15), frame=bool(rng.random() < 0.15),
+        figsize=(float(1.8 + 0.5 * n), float(rng.uniform(2.4, 3.6))), dpi=int(rng.choice([110, 150, 200, 300])),
+    )
+
+
+def fuzz_boxes(n: int, rng, ex, opts, show) -> int:
+    ok, errs, failures = 0, [], []
+    t0 = time.time()
+    for i in range(n):
+        spec = random_box_spec(rng)
+        img = render_box(spec)
+        panels = ex.extract(img, opts)
+        reason = None
+        if len(panels) != 1 or panels[0].kind != "box":
+            reason = f"{len(panels)} panels" + (f" ({panels[0].kind})" if panels else "")
+        elif len(panels[0].boxes) != len(spec.stats):
+            reason = f"{len(panels[0].boxes)}/{len(spec.stats)} boxes"
+        else:
+            span = spec.ylim[1] - spec.ylim[0]
+            e = [abs(got - want) / span * 100 if got is not None else 100.0
+                 for b, st in zip(panels[0].boxes, spec.stats)
+                 for got, want in zip((b.lo, b.q1, b.median, b.q3, b.hi), st)]
+            errs += e
+            if max(e) >= 1:
+                reason = f"stat err {max(e):.2f}%"
+        if reason is None:
+            ok += 1
+        else:
+            failures.append((i, spec, reason))
+            if show:
+                os.makedirs(show, exist_ok=True)
+                cv2.imwrite(os.path.join(show, f"box_fail_{i:03d}.png"), img)
+    dt = time.time() - t0
+    print(f"box plots: {n}  fully correct: {ok} ({100 * ok / n:.1f}%)  time {dt:.1f}s ({1000 * dt / n:.0f} ms/chart)")
+    if errs:
+        e = np.array(errs)
+        print(f"stat err: median {np.median(e):.3f}%  p95 {np.percentile(e, 95):.3f}%  max {e.max():.2f}%")
+    for i, spec, reason in failures[:25]:
+        print(f"  #{i}: {reason}  n={len(spec.stats)} colors={'yes' if spec.colors else 'no'} caps={spec.caps} "
+              f"dashed={spec.dashed} grid={spec.grid} frame={spec.frame} lw={spec.linewidth} dpi={spec.dpi}")
+    return 0 if ok >= 0.95 * n else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("n", nargs="?", type=int, default=200)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--show-failures", default=None)
+    ap.add_argument("--box", action="store_true", help="random box plots instead of bar charts")
     args = ap.parse_args()
     rng = np.random.default_rng(args.seed)
     ex = FigureExtractor()
     opts = ExtractOptions(bar_names=False, titles=False)
+    if args.box:
+        return fuzz_boxes(args.n, rng, ex, opts, args.show_failures)
     ok = 0
     mean_errs, cap_errs, flagged, failures = [], [], 0, []
     t0 = time.time()

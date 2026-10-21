@@ -81,7 +81,7 @@ const HomePage = () => (
       <div className="row g-4">
         {[
           { icon: 'bi-graph-up-arrow', title: 'Bar Graph Analysis', desc: 'Extract precise measurements from bar charts with AI-powered detection and interactive editing tools.', link: '/bar_analyzer' },
-          { icon: 'bi-box', title: 'Box Detection', desc: 'Identify and analyze rectangular elements in images with advanced computer vision algorithms.', link: '/box_analyzer' },
+          { icon: 'bi-box', title: 'Box Plot Analysis', desc: 'Read min, quartiles, median and max from box plots and estimate mean and SD for meta-analysis (Luo, Shi, Wan, Hozo).', link: '/box_analyzer' },
           { icon: 'bi-graph-up', title: 'Line Graph Analysis', desc: 'Extract data points and trends from line graphs with precision and accuracy.', link: '/line_analyzer' }
         ].map((feature, i) => (
           <div key={i} className="col-lg-4 col-md-6">
@@ -755,6 +755,8 @@ function App() {
         <Routes>
           <Route path="/bar_analyzer" element={<BarAnalyzer />} />
           <Route path="/extract" element={<BatchExtractor />} />
+          {/* box plots are detected on the Batch Extract page alongside bar charts */}
+          <Route path="/box_analyzer" element={<BatchExtractor />} />
           <Route path="/tutorial" element={<TutorialPage />} />
           <Route path="/" element={<HomePage />} />
         </Routes>

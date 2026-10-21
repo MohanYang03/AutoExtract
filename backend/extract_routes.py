@@ -1,7 +1,7 @@
 """
 Batch extraction API.
 
-POST /api/extract   multipart `file` (PDF or image) -> every bar-chart panel found
+POST /api/extract   multipart `file` (PDF or image) -> every bar-chart / box-plot panel found
 POST /api/export    JSON {figures: [...]} (possibly edited)  -> .xlsx download
 
 Unlike the single-image bar analyzer, these endpoints keep no per-user state on
@@ -26,6 +26,7 @@ from werkzeug.utils import secure_filename
 
 from config import BASE_DIR
 from exporter import PanelResult, build_workbook, paper_id_from_path
+from estimators import MEAN_METHODS, SD_METHODS, WHISKER_TYPES
 from figure_extractor import ExtractOptions, FigureExtractor, Panel
 
 JOBS_DIR = os.path.join(BASE_DIR, "static", "jobs")
@@ -123,6 +124,12 @@ def handle_extract() -> Tuple[Dict[str, Any], int]:
         os.remove(tmp)
 
 
+def _check_numbers(*values) -> None:
+    for v in values:
+        if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float))):
+            raise ValueError("values must be numbers")
+
+
 def handle_export():
     data = request.get_json(silent=True) or {}
     results = []
@@ -132,14 +139,22 @@ def handle_export():
                 if pd.get("excluded"):
                     continue
                 panel = Panel.from_dict(pd)
-                for b in panel.bars:   # values must be numbers (they came from us, but were editable)
-                    for v in (b.mean, b.mean_plus_err):
-                        if v is not None and not isinstance(v, (int, float)):
-                            raise ValueError("bar values must be numbers")
+                # values must be numbers (they came from us, but were editable)
+                for b in panel.bars:
+                    _check_numbers(b.mean, b.mean_plus_err)
+                for b in panel.boxes:
+                    _check_numbers(b.lo, b.q1, b.median, b.q3, b.hi)
+                for b in panel.items:
                     if b.n is not None:
                         b.n = int(b.n)
                 if panel.error_type not in ("sem", "sd"):
                     panel.error_type = "sem"
+                if panel.whisker_type not in WHISKER_TYPES:
+                    panel.whisker_type = "minmax"
+                if panel.mean_method not in MEAN_METHODS:
+                    panel.mean_method = "luo"
+                if panel.sd_method not in SD_METHODS:
+                    panel.sd_method = "shi"
                 results.append(PanelResult(source=str(fig.get("source", "")), page=int(fig.get("page", -1)),
                                            figure=str(fig.get("figure", "")), panel=panel,
                                            paper_id=fig.get("paper_id")))

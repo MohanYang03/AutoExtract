@@ -60,9 +60,17 @@ def create_app() -> Flask:
 
 
 def register_frontend_spa(app: Flask) -> None:
-    """Serve the built React app when FRONTEND_DIST points at `vite build` output."""
-    dist_dir = os.environ.get("FRONTEND_DIST", "").strip()
-    if not dist_dir or not os.path.isdir(dist_dir):
+    """
+    Serve the built React app from FRONTEND_DIST, or from the repo's own
+    frontend/dist when that variable is unset (so `python backend/app.py`
+    just works after `npm run build`).
+    """
+    default_dist = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend", "dist")
+    dist_dir = os.environ.get("FRONTEND_DIST", "").strip() or default_dist
+    # Absolute: Flask resolves relative paths against backend/, not the cwd
+    dist_dir = os.path.abspath(dist_dir)
+    if not os.path.isdir(dist_dir):
+        print(f"Frontend build not found at {dist_dir}; run `npm run build` in frontend/")
         return
 
     dist_real = os.path.realpath(dist_dir)

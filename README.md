@@ -1,4 +1,4 @@
-# AutoDigitizer
+# AutoExtract
 
 A web app that extracts data from charts in scientific papers: bar charts, dot plots, box plots, violin plots and line plots. Drop in whole PDFs: every chart of the page's type is found, its axes calibrated from the tick labels, and each group's mean and error bar (or min, quartiles, median and max; or each line point and its error bar) measured from the pixels. Box and violin plots also get an estimated mean and SD for meta-analysis. Results go to one Excel workbook laid out like a meta-analysis long-format sheet, ready to paste.
 
@@ -15,8 +15,8 @@ Then, in a terminal:
 
 **Windows (PowerShell)**
 ```powershell
-git clone https://github.com/gordonzyxu/AutoDigitizer.git
-cd AutoDigitizer
+git clone https://github.com/gordonzyxu/AutoExtract.git
+cd AutoExtract
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
 cd frontend; npm install; npm run build; cd ..
@@ -24,8 +24,8 @@ cd frontend; npm install; npm run build; cd ..
 
 **macOS / Linux**
 ```bash
-git clone https://github.com/gordonzyxu/AutoDigitizer.git
-cd AutoDigitizer
+git clone https://github.com/gordonzyxu/AutoExtract.git
+cd AutoExtract
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 cd frontend && npm install && npm run build && cd ..
@@ -35,7 +35,7 @@ The Python install downloads about 2 GB the first time (PyTorch, used only by th
 
 ## Run
 
-From the `AutoDigitizer` folder:
+From the `AutoExtract` folder:
 
 ```powershell
 .venv\Scripts\python backend\app.py      # Windows
@@ -59,7 +59,7 @@ Then run it as above.
 - **Page says "Resource not found" / 404**: the web page isn't built yet. Run `cd frontend; npm install; npm run build; cd ..` and restart.
 - **`python` not found (Windows)**: reinstall Python with "Add python.exe to PATH" ticked, or use `py -3.12 -m venv .venv`.
 - **pip can't find `torch==2.3.0`**: your Python is too new; install Python 3.12 and recreate `.venv`.
-- **pip error mentioning "Long Path support" (Windows)**: the folder path is too long for PyTorch's files. Clone somewhere shorter (e.g. `C:\Code\AutoDigitizer`), delete `.venv`, and run the setup again.
+- **pip error mentioning "Long Path support" (Windows)**: the folder path is too long for PyTorch's files. Clone somewhere shorter (e.g. `C:\Code\AutoExtract`), delete `.venv`, and run the setup again.
 - **Port 2800 already in use**: start on another port, e.g. PowerShell `$env:PORT=2801; .venv\Scripts\python backend\app.py`, then open http://localhost:2801/bar_analyzer.
 - **`git clone` asks for access / "repository not found"**: the repository is private; ask the owner to add your GitHub account as a collaborator.
 
@@ -68,10 +68,10 @@ Then run it as above.
 Instead of the Python/Node setup, with Docker installed:
 
 ```bash
-git clone https://github.com/gordonzyxu/AutoDigitizer.git
-cd AutoDigitizer
-docker build -t autodigitizer .
-docker run --rm -p 2800:2800 autodigitizer
+git clone https://github.com/gordonzyxu/AutoExtract.git
+cd AutoExtract
+docker build -t autoextract .
+docker run --rm -p 2800:2800 autoextract
 ```
 
 Open **http://localhost:2800/bar_analyzer**. The image includes the built page and the Bar Analyzer weights (`backend/models/best.pt`); to use your own weights add `-v /absolute/path/best.pt:/app/backend/models/best.pt:ro` to `docker run`.

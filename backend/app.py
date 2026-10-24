@@ -11,7 +11,7 @@ This application offers:
 - RESTful API endpoints for frontend integration
 
 Author: Mohan Yang
-Repository: https://github.com/HenryYang03/AutoExtract.git
+Repository: https://github.com/MohanYang03/AutoExtract.git
 """
 
 from flask import Flask, abort, jsonify, send_from_directory

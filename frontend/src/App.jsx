@@ -125,7 +125,7 @@ function App() {
         <p className="mb-0 small">
           <a href="https://xulab.anat.uci.edu/" target="_blank" rel="noopener noreferrer" className="me-3">Xulab</a>
           <a href="https://ics.uci.edu/~zhaoxia/" target="_blank" rel="noopener noreferrer" className="me-3">Yulab</a>
-          <a href="https://github.com/HenryYang03/AutoExtract" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href="https://github.com/MohanYang03/AutoExtract" target="_blank" rel="noopener noreferrer">GitHub</a>
         </p>
       </footer>
     </Router>

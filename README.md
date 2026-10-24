@@ -4,12 +4,22 @@ Extract numbers from charts in scientific papers (bar, dot, box, violin, and lin
 
 ## Run with Docker (recommended)
 
-You need [Docker Desktop](https://www.docker.com/products/docker-desktop/). Then:
+Install [Docker Desktop](https://www.docker.com/products/docker-desktop/). Then either:
+
+**Terminal**
 
 ```bash
 docker pull yanghenry/autoextract:latest
 docker run --rm -p 2800:2800 yanghenry/autoextract:latest
 ```
+
+**Docker Desktop:** pull `yanghenry/autoextract:latest`, click Run, and set **Host port** to `2800` (container port is already `:2800/tcp`):
+
+![Docker Desktop: set Host port to 2800](docs/docker-host-port.png)
+
+If the Host port is left empty and the app will not be reachable.
+
+Open **http://127.0.0.1:2800**. Do not use `http://0.0.0.0:2800`.
 
 ## Using the app
 
@@ -39,7 +49,7 @@ cd frontend && npm install && npm run build && cd ..
 
 On Windows, use `python` / `.venv\Scripts\python` instead of `python3` / `.venv/bin/python`.
 
-Open **http://localhost:2800**. If the page 404s, the frontend is not built yet (`npm run build` in `frontend/`).
+Open **http://127.0.0.1:2800**. If the page 404s, the frontend is not built yet (`npm run build` in `frontend/`).
 
 ## Command line (optional)
 

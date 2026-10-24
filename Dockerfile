@@ -1,7 +1,7 @@
-# Build: docker build -t yourdockerhub/autoextract:latest .
-# Run:  docker run --rm -p 2800:2800 yourdockerhub/autoextract:latest
-# Optional custom weights: -v /path/to/best.pt:/app/backend/models/best.pt:ro
-# This image listens on 2800 (not 9000). Map host 2800 -> container 2800.
+# Build: docker build -t yanghenry/autoextract:latest .
+# Run:  docker run --rm -p 2800:2800 yanghenry/autoextract:latest
+# Open http://127.0.0.1:2800  (not http://0.0.0.0:2800)
+# EXPOSE does not publish the port; -p 2800:2800 is required on Mac and Windows.
 
 FROM node:22-bookworm-slim AS frontend-build
 WORKDIR /app/frontend
@@ -42,5 +42,5 @@ ENV PYTHONPATH=/app/backend \
 WORKDIR /app/backend
 EXPOSE 2800
 
-# Use PORT from the environment (default 2800). Long timeout: YOLO load and PDF extract can be slow on CPU.
-CMD ["sh", "-c", "exec gunicorn --bind 0.0.0.0:${PORT:-2800} --workers 1 --threads 4 --timeout 300 wsgi:application"]
+# gunicorn.conf.py binds 0.0.0.0:$PORT and prints http://127.0.0.1 (not 0.0.0.0).
+CMD ["gunicorn", "--config", "gunicorn.conf.py", "wsgi:application"]

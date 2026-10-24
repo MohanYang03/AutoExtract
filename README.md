@@ -13,11 +13,18 @@ docker pull yanghenry/autoextract:latest
 docker run --rm -p 2800:2800 yanghenry/autoextract:latest
 ```
 
-**Docker Desktop:** pull `yanghenry/autoextract:latest`, click Run, and set **Host port** to `2800` (container port is already `:2800/tcp`):
+**Docker Desktop:** search Docker Hub for `yanghenry/autoextract`, pull it, click Run, and set **Host port** to `2800`. If Host port is empty, the app will not be reachable.
 
-![Docker Desktop: set Host port to 2800](docs/docker-host-port.png)
-
-If the Host port is left empty and the app will not be reachable.
+<table>
+<tr>
+<td align="center"><img src="docs/dockerhub-repo.png" alt="Search Docker Hub for yanghenry/autoextract" /></td>
+<td align="center"><img src="docs/docker-host-port.png" alt="Set Host port to 2800" /></td>
+</tr>
+<tr>
+<td align="center">Search for <code>yanghenry/autoextract</code></td>
+<td align="center">Set Host port to <code>2800</code></td>
+</tr>
+</table>
 
 Open **http://127.0.0.1:2800**. Do not use `http://0.0.0.0:2800`.
 

@@ -2,7 +2,9 @@
 
 A web app that extracts data from charts in scientific papers: bar charts, dot plots, box plots, violin plots and line plots. Drop in whole PDFs: every chart of the page's type is found, its axes calibrated from the tick labels, and each group's mean and error bar (or min, quartiles, median and max; or each line point and its error bar) measured from the pixels. Box and violin plots also get an estimated mean and SD for meta-analysis. Results go to one Excel workbook laid out like a meta-analysis long-format sheet, ready to paste.
 
-Built on [AutoExtract](https://github.com/MohanYang03/AutoExtract) by Mohan Yang; its Bar, Box and Line Analyzer pages are now batch extractors (plus a new Violin Analyzer), and its YOLO-based single-image analysis remains available as an API endpoint. The backend runs on Flask; the frontend is a Vite + React app.
+Built on [AutoExtract](https://github.com/HenryYang03/AutoExtract) by Mohan Yang; its Bar, Box and Line Analyzer pages are now batch extractors (plus a new Violin Analyzer), and its YOLO-based single-image analysis remains available as an API endpoint. The backend runs on Flask; the frontend is a Vite + React app.
+
+**Port:** this version listens on **2800** (not 9000). Open **http://localhost:2800**. Docker must map that same port: `-p 2800:2800`. To use another port, set `PORT` when running `python backend/app.py` (the Vite proxy and the Docker `CMD` still assume 2800 unless you change them).
 
 ## Setup (once)
 
@@ -15,7 +17,7 @@ Then, in a terminal:
 
 **Windows (PowerShell)**
 ```powershell
-git clone https://github.com/gordonzyxu/AutoExtract.git
+git clone https://github.com/HenryYang03/AutoExtract.git
 cd AutoExtract
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
@@ -24,7 +26,7 @@ cd frontend; npm install; npm run build; cd ..
 
 **macOS / Linux**
 ```bash
-git clone https://github.com/gordonzyxu/AutoExtract.git
+git clone https://github.com/HenryYang03/AutoExtract.git
 cd AutoExtract
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
@@ -68,13 +70,13 @@ Then run it as above.
 Instead of the Python/Node setup, with Docker installed:
 
 ```bash
-git clone https://github.com/gordonzyxu/AutoExtract.git
+git clone https://github.com/HenryYang03/AutoExtract.git
 cd AutoExtract
 docker build -t autoextract .
 docker run --rm -p 2800:2800 autoextract
 ```
 
-Open **http://localhost:2800/bar_analyzer**. The image includes the built page and the Bar Analyzer weights (`backend/models/best.pt`); to use your own weights add `-v /absolute/path/best.pt:/app/backend/models/best.pt:ro` to `docker run`.
+Open **http://localhost:2800/bar_analyzer** (host 2800 → container 2800). Older docs that used `docker run -p 9000:9000` will not reach this image. The image includes the built page and the Bar Analyzer weights (`backend/models/best.pt`); to use your own weights add `-v /absolute/path/best.pt:/app/backend/models/best.pt:ro` to `docker run`.
 
 ## Using it
 
@@ -211,4 +213,3 @@ Frontend (`frontend/`)
 - RapidOCR (text recognition) and PyMuPDF (PDF figures)
 - Ultralytics YOLOv5 (object detection, classic analyzer)
 - Flask (backend) and React + Vite (frontend)
-- Fabric.js (interactive canvas)

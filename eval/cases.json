@@ -1,0 +1,11 @@
+{
+  "_comment": "Ground truth lives in the meta-analysis spreadsheets (not copied here). 'point' is any pixel inside the target panel's plot area, in the figure image's own pixel coordinates.",
+  "cases": [
+    {"paper": "(paper11) data for 2024 Chen et al", "pdf": "1-s2.0-S0165032723015586-main.pdf", "figure_page": 3, "point": [500, 1100], "truth": "Long_format_FST_struggling_time_1.xlsx"},
+    {"paper": "(paper11) data for 2024 Chen et al", "pdf": "1-s2.0-S0165032723015586-main.pdf", "figure_page": 3, "point": [500, 1800], "truth": "Long_format_OFT_total_distance_1.xlsx"},
+    {"paper": "(paper11) data for 2024 Chen et al", "pdf": "1-s2.0-S0165032723015586-main.pdf", "figure_page": 6, "point": [550, 1200], "truth": "Long_format_FST_struggling_time_5.xlsx"},
+    {"paper": "(paper11) data for 2024 Chen et al", "pdf": "1-s2.0-S0165032723015586-main.pdf", "figure_page": 6, "point": [550, 1950], "truth": "Long_format_OFT_total_distance_5.xlsx"},
+    {"paper": "(paper11) data for 2024 Chen et al", "pdf": "1-s2.0-S0165032723015586-main.pdf", "figure_page": 8, "point": [350, 800], "truth": "Long_format_FST_struggling_time_7.xlsx"},
+    {"paper": "(paper11) data for 2024 Chen et al", "pdf": "1-s2.0-S0165032723015586-main.pdf", "figure_page": 8, "point": [350, 1250], "truth": "Long_format_OFT_total_distance_7.xlsx"}
+  ]
+}

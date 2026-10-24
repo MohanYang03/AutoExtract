@@ -11,15 +11,15 @@ This application offers:
 - RESTful API endpoints for frontend integration
 
 Author: Mohan Yang
-Repository: https://github.com/HenryYang03/AutoExtract.git
+Repository: https://github.com/MohanYang03/AutoExtract.git
 """
 
 from flask import Flask, abort, jsonify, send_from_directory
 import os
 
 from config import UPLOAD_DIR, SECRET_KEY, HOST, PORT, DEBUG
-from model_manager import model_manager
 from routes import handle_bar_analyzer, handle_update_values, handle_update_box_coordinates, handle_uploaded_file, handle_calculate_heights, handle_update_bar_names, handle_update_box_category, handle_add_new_box, handle_remove_box
+from extract_routes import handle_extract, handle_export, handle_job_file
 
 
 def create_app() -> Flask:
@@ -42,6 +42,7 @@ def create_app() -> Flask:
     # Configure app
     app.secret_key = SECRET_KEY
     app.config['UPLOAD_FOLDER'] = UPLOAD_DIR
+    app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024   # whole papers can be large PDFs
     
     # Ensure upload directory exists
     os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -59,9 +60,17 @@ def create_app() -> Flask:
 
 
 def register_frontend_spa(app: Flask) -> None:
-    """Serve the built React app when FRONTEND_DIST points at `vite build` output."""
-    dist_dir = os.environ.get("FRONTEND_DIST", "").strip()
-    if not dist_dir or not os.path.isdir(dist_dir):
+    """
+    Serve the built React app from FRONTEND_DIST, or from the repo's own
+    frontend/dist when that variable is unset (so `python backend/app.py`
+    just works after `npm run build`).
+    """
+    default_dist = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend", "dist")
+    dist_dir = os.environ.get("FRONTEND_DIST", "").strip() or default_dist
+    # Absolute: Flask resolves relative paths against backend/, not the cwd
+    dist_dir = os.path.abspath(dist_dir)
+    if not os.path.isdir(dist_dir):
+        print(f"Frontend build not found at {dist_dir}; run `npm run build` in frontend/")
         return
 
     dist_real = os.path.realpath(dist_dir)
@@ -163,12 +172,17 @@ def register_routes(app: Flask) -> None:
         methods=['POST']
     )
     
-    # File serving route
+    # Batch figure extraction (PDFs or images -> every bar-chart panel)
+    app.add_url_rule('/api/extract', 'extract', handle_extract, methods=['POST'])
+    app.add_url_rule('/api/export', 'export', handle_export, methods=['POST'])
+
+    # File serving routes
     app.add_url_rule(
         '/static/uploads/<filename>',
         'uploaded_file',
         handle_uploaded_file
     )
+    app.add_url_rule('/static/jobs/<job>/<filename>', 'job_file', handle_job_file)
 
 
 def register_error_handlers(app: Flask) -> None:
@@ -204,13 +218,10 @@ def main():
     # Create and configure app
     app = create_app()
     
-    # Check if model is ready
-    if not model_manager.is_ready():
-        print("Warning: BarGraphAnalyzer model failed to initialize!")
-        print("The application may not function properly.")
-    else:
-        print("✓ BarGraphAnalyzer model initialized successfully")
-    
+    # The YOLO model for the classic Bar Analyzer loads on its first request;
+    # Batch Extract does not need it.
+    print("Bar Analyzer model loads on first use; Batch Extract is ready.")
+
     # Start the server
     print(f"Starting AutoExtract backend server on {HOST}:{PORT}")
     print(f"Debug mode: {'ON' if DEBUG else 'OFF'}")

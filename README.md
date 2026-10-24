@@ -2,8 +2,6 @@
 
 Extract numbers from charts in scientific papers (bar, dot, box, violin, and line plots). Drop in PDFs or images, review the results, and download Excel.
 
-The app listens on **port 2800**. Use **http://localhost:2800** (not 9000).
-
 ## Run with Docker (recommended)
 
 You need [Docker Desktop](https://www.docker.com/products/docker-desktop/). Then:
@@ -11,25 +9,6 @@ You need [Docker Desktop](https://www.docker.com/products/docker-desktop/). Then
 ```bash
 docker pull yanghenry/autoextract:latest
 docker run --rm -p 2800:2800 yanghenry/autoextract:latest
-```
-
-Open **http://localhost:2800**.
-
-The image already includes the default YOLO weights. To use your own `best.pt` instead:
-
-```bash
-docker run --rm -p 2800:2800 \
-  -v /absolute/path/on/host/best.pt:/app/backend/models/best.pt:ro \
-  yanghenry/autoextract:latest
-```
-
-Build from this repo instead of pulling:
-
-```bash
-git clone https://github.com/MohanYang03/AutoExtract.git
-cd AutoExtract
-docker build -t autoextract .
-docker run --rm -p 2800:2800 autoextract
 ```
 
 ## Using the app
